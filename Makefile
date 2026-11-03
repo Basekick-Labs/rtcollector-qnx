@@ -73,7 +73,7 @@ ifeq ($(SANITIZE),thread)
 endif
 
 CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config.c \
-            src/core/cpumath.c src/core/inputs.c \
+            src/core/cpumath.c src/core/inputs.c src/core/lp.c src/core/lpdrain.c \
             src/core/log.c src/core/collector.c src/inputs/internal.c \
             src/outputs/arc_encode.c src/outputs/arc.c src/outputs/stdout.c
 TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpack.c \
@@ -109,7 +109,7 @@ tsan:
 	$(TSAN_RUN) build-tsan/rtc_tests ring
 	$(TSAN_RUN) build-tsan/rtc_tests lifecycle
 
-FMT_FILES := $(shell find src tests -name '*.[ch]')
+FMT_FILES := $(shell find src tests include -name '*.[ch]')
 
 format:
 	clang-format -i $(FMT_FILES)
@@ -125,7 +125,10 @@ ARCH ?= x86_64
 qnx:
 	@test -n "$(QNX_TARGET)" || { echo "source qnxsdp-env.sh first"; exit 1; }
 	$(MAKE) PLATFORM=qnx BUILD=build-qnx-$(ARCH) CC="qcc -Vgcc_nto$(ARCH)" \
-	  build-qnx-$(ARCH)/rtcollector
+	  build-qnx-$(ARCH)/rtcollector build-qnx-$(ARCH)/rtc_writer
+
+$(BUILD)/rtc_writer: tests/qnx/rtc_writer.c include/rtc_publish.h
+	$(CC) $(CFLAGS) $< -o $@
 
 clean:
 	rm -rf build build-tsan build-asan build-qnx-*

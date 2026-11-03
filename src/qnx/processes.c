@@ -92,4 +92,4 @@ static int gather(rtc_collector *c)
 	return 0;
 }
 
-const rtc_input_def rtc_input_processes = {"processes", init, gather};
+const rtc_input_def rtc_input_processes = {.name = "processes", .init = init, .gather = gather};

@@ -1,6 +1,7 @@
 #include "collector.h"
 
 #include "log.h"
+#include "lpdrain.h"
 
 #include <errno.h>
 #include <sched.h>
@@ -115,6 +116,9 @@ void rtc_collector_destroy(rtc_collector *c)
 	for (unsigned i = 0; i < c->noutputs; i++)
 		if (c->outputs[i] && c->outputs[i]->destroy)
 			c->outputs[i]->destroy(c->outputs[i]);
+	for (unsigned i = 0; i < c->ninputs; i++)
+		if (c->inputs[i]->destroy)
+			c->inputs[i]->destroy(c);
 	free(c->scratch);
 	rtc_ring_free(&c->ring);
 }
@@ -126,7 +130,13 @@ void rtc_emit(rtc_collector *c, rtc_rec_builder *b)
 		rtc_counter_add(&c->counters.records_invalid, 1);
 		return;
 	}
-	uint64_t ts = rtc_now_ns();
+	rtc_emit_record(c, b->buf, len, 0);
+}
+
+void rtc_emit_record(rtc_collector *c, const uint8_t *rec, size_t len, uint64_t ts)
+{
+	if (ts == 0)
+		ts = rtc_now_ns();
 	if (ts < c->clock_floor_ns) {
 		/* A device without a battery-backed clock boots near 1970. Arc reads
 		 * the time unit from the value's magnitude, so such a timestamp
@@ -134,7 +144,7 @@ void rtc_emit(rtc_collector *c, rtc_rec_builder *b)
 		rtc_counter_add(&c->counters.records_clock_invalid, 1);
 		return;
 	}
-	switch (rtc_ring_push(&c->ring, b->buf, (uint32_t)len, ts)) {
+	switch (rtc_ring_push(&c->ring, rec, (uint32_t)len, ts)) {
 	case RTC_PUSH_OK:
 		rtc_counter_add(&c->counters.records_gathered, 1);
 		break;
@@ -176,13 +186,26 @@ static void *collect_main(void *arg)
 		 * not accumulate. Sleep toward it in short slices so stop is honoured
 		 * promptly; macOS has no clock_nanosleep(TIMER_ABSTIME). */
 		while (!atomic_load(&c->stop)) {
+			/* Convert what /dev/rtcollector received; bounded per step. */
+			if (c->lp_drain)
+				rtc_lp_drain_step(c, c->lp_drain);
 			uint64_t n = rtc_mono_ns();
 			if (n >= next)
 				break;
-			uint64_t slice = next - n < 100000000u ? next - n : 100000000u;
+			uint64_t max_slice = c->lp_drain ? 20000000u : 100000000u;
+			uint64_t slice = next - n < max_slice ? next - n : max_slice;
 			struct timespec s = {(time_t)(slice / 1000000000u), (long)(slice % 1000000000u)};
 			nanosleep(&s, NULL);
 		}
+	}
+	/* The resource manager has stopped (rtc_collector_stop stops it first):
+	 * convert what it received, then count anything left as dropped. */
+	if (c->lp_drain) {
+		for (int i = 0; i < 1024 && rtc_lp_drain_step(c, c->lp_drain) > 0; i++)
+			;
+		uint64_t left = rtc_ring_unseen(c->lp_drain->ring, 0);
+		if (left)
+			rtc_counter_add(&c->counters.rmgr_drain_dropped, left);
 	}
 	return NULL;
 }
@@ -311,7 +334,8 @@ static void *send_main(void *arg)
  * runs at the inherited one. On QNX a non-root user may not go above 63
  * (PROCMGR_AID_PRIORITY): then it starts with the inherited priority, once
  * logged and counted. Elsewhere the priority keys are ignored. */
-static int start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), int prio, const char *what)
+int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
+                     const char *what)
 {
 #ifdef RTC_QNX
 	pthread_attr_t a;
@@ -324,7 +348,7 @@ static int start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), int
 		if (rc == 0)
 			rc = pthread_attr_setschedparam(&a, &sp);
 		if (rc == 0)
-			rc = pthread_create(t, &a, fn, c);
+			rc = pthread_create(t, &a, fn, arg);
 		pthread_attr_destroy(&a);
 		if (rc == 0)
 			return 0;
@@ -333,20 +357,26 @@ static int start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), int
 	         strerror(rc));
 	rtc_counter_add(&c->counters.priority_fallback, 1);
 #else
+	(void)c;
 	(void)prio;
 	(void)what;
 #endif
-	return pthread_create(t, NULL, fn, c);
+	return pthread_create(t, NULL, fn, arg);
 }
 
 int rtc_collector_start(rtc_collector *c)
 {
-	int rc = start_thread(c, &c->send_thread, send_main, c->cfg.send_priority, "sender");
+	int rc = rtc_start_thread(c, &c->send_thread, send_main, c, c->cfg.send_priority, "sender");
 	if (rc != 0) {
 		RTC_ERROR(C, "cannot start the sender thread: %s", strerror(rc));
 		return -1;
 	}
-	rc = start_thread(c, &c->collect_thread, collect_main, c->cfg.collect_priority, "collection");
+	rc = rtc_start_thread(c, &c->collect_thread, collect_main, c, c->cfg.collect_priority, "collection");
+	if (rc == 0) {
+		for (unsigned i = 0; i < c->ninputs; i++)
+			if (c->inputs[i]->start)
+				c->inputs[i]->start(c); /* failures are counted by the input, never fatal */
+	}
 	if (rc != 0) {
 		RTC_ERROR(C, "cannot start the collection thread: %s", strerror(rc));
 		atomic_store(&c->abort_after_ns, rtc_mono_ns());
@@ -359,6 +389,11 @@ int rtc_collector_start(rtc_collector *c)
 
 void rtc_collector_stop(rtc_collector *c)
 {
+	/* Inputs with threads of their own (the resource manager) stop first, so
+	 * the collection thread's final drain sees everything they accepted. */
+	for (unsigned i = 0; i < c->ninputs; i++)
+		if (c->inputs[i]->stop)
+			c->inputs[i]->stop(c);
 	/* The deadline first: a request in flight right now is aborted when it
 	 * passes, even though it was started without one. */
 	uint64_t budget = (uint64_t)llround(c->cfg.shutdown_timeout_s * 1e9);

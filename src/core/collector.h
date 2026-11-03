@@ -6,6 +6,7 @@
 #include "config.h"
 #include "counters.h"
 #include "record.h"
+#include "lpdrain.h"
 #include "ring.h"
 
 #include <pthread.h>
@@ -22,6 +23,11 @@ typedef struct {
 	/* Called once per round on the collection thread. Builds records into
 	 * c->scratch and emits each with rtc_emit(). Returns 0 or -1. */
 	int (*gather)(rtc_collector *c);
+	/* Optional, for inputs with a thread of their own: started after the
+	 * collector's threads (never under --once), stopped before them. */
+	void (*start)(rtc_collector *c);
+	void (*stop)(rtc_collector *c);
+	void (*destroy)(rtc_collector *c);
 } rtc_input_def;
 
 enum rtc_send_outcome {
@@ -64,6 +70,9 @@ struct rtc_collector {
 	rtc_config cfg;
 	rtc_ring ring;
 	rtc_collect_counters counters;
+	rtc_rmgr_counters rmgr_counters;
+	/* Set by the rmgr input: raw writes the collection thread converts. */
+	rtc_lp_drain *lp_drain;
 	uint8_t *scratch; /* max_record_bytes, collection thread only */
 
 	const rtc_input_def *inputs[RTC_CFG_MAX_INPUTS];
@@ -95,6 +104,11 @@ int rtc_collector_run_once(rtc_collector *c);
 
 /* Collection-thread helpers for inputs. */
 void rtc_emit(rtc_collector *c, rtc_rec_builder *b);
+/* An already-built record with its timestamp (0 = now). */
+void rtc_emit_record(rtc_collector *c, const uint8_t *rec, size_t len, uint64_t ts);
+/* Starts a thread at a fixed SCHED_RR priority on QNX (see collector.c). */
+int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
+                     const char *what);
 uint64_t rtc_now_ns(void);  /* CLOCK_REALTIME */
 uint64_t rtc_mono_ns(void); /* CLOCK_MONOTONIC */
 const char *rtc_hostname(const rtc_collector *c);
@@ -109,6 +123,7 @@ extern const rtc_input_def rtc_input_internal;
 extern const rtc_input_def rtc_input_cpu;
 extern const rtc_input_def rtc_input_mem;
 extern const rtc_input_def rtc_input_processes;
+extern const rtc_input_def rtc_input_rmgr;
 #endif
 /* The input called name in this build, or NULL. */
 const rtc_input_def *rtc_input_find(const char *name);

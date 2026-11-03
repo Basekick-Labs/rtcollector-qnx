@@ -15,6 +15,9 @@
  *   send_priority: 9        QNX: sender thread priority
  *   processes_every: 6      rounds between process scans
  *   max_processes: 4096     a scan stops here (overflow counted)
+ *   rmgr_path: /dev/rtcollector   rmgr input: where programs write line protocol
+ *   rmgr_mode: 0660         its permissions (octal); rmgr_group: 0 its group
+ *   rmgr_buffer_bytes: 256KiB, max_write_bytes: 4096, rmgr_drain_bytes: 64KiB
  *   inputs: [internal, ...] a name, or {name: {config}}
  *   outputs:
  *     - arc: {url, database, token, batch_bytes, timeout, max_measurements_per_batch (1-256)}
@@ -60,6 +63,13 @@ typedef struct {
 	int collect_priority; /* QNX scheduling priority, SCHED_RR */
 	int send_priority;
 	unsigned processes_every; /* rounds between process scans */
+	/* /dev/rtcollector (input rmgr, QNX) */
+	char rmgr_path[256];
+	unsigned rmgr_mode; /* permission bits, octal in YAML */
+	int rmgr_group;     /* gid owning the device */
+	size_t rmgr_buffer_bytes;
+	size_t max_write_bytes;
+	size_t rmgr_drain_bytes;
 	uint64_t max_processes;
 	size_t buffer_bytes;
 	uint32_t max_record_bytes;

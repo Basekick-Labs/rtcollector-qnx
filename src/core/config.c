@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <yaml.h>
 
 #define C "config"
@@ -435,6 +436,21 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "outputs.stdout.batch_bytes: must be between max_record_bytes and buffer_bytes");
 		bad++;
 	}
+	for (unsigned i = 0; i < c->ntags; i++) {
+		const char *k = c->tags[i].key;
+		bool time_alike = strlen(k) == 4 && strncasecmp(k, "time", 4) == 0;
+		if (!k[0] || time_alike) {
+			RTC_ERROR(C, "tags: \"%s\" cannot be a tag name (time is the timestamp)", k);
+			bad++;
+		}
+		for (unsigned j = 0; j < i; j++)
+			if (strcasecmp(k, c->tags[j].key) == 0) {
+				RTC_ERROR(C, "tags: \"%s\" and \"%s\" differ only in letter case",
+				          c->tags[j].key, k);
+				bad++;
+			}
+	}
+
 	/* Like rtcollector, the internal input is always on: its drop counters
 	 * are how an operator sees that the collector stayed out of the way. */
 	bool have_internal = false;

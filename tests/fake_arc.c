@@ -129,7 +129,8 @@ fake_arc *fake_arc_start(const fake_reply *script, size_t n)
 	if (!f)
 		return NULL;
 	pthread_mutex_init(&f->mu, NULL);
-	memcpy(f->script, script, n * sizeof(*script));
+	if (n)
+		memcpy(f->script, script, n * sizeof(*script));
 	f->nscript = n;
 	f->lfd = socket(AF_INET, SOCK_STREAM, 0);
 	int one = 1;

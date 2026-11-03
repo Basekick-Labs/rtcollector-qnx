@@ -257,8 +257,13 @@ static void stress_every_record_delivered_once_or_counted(void)
 	rtc_ring_rec recs[256];
 	uint64_t delivered = 0, gaps = 0, last_id = 0, bad = 0, order = 0;
 	bool any = false;
-	for (;;) {
+	for (unsigned iter = 0;; iter++) {
 		bool fin = atomic_load(&p.done);
+		if (iter % 16 == 15) {
+			/* Stall outside any claim too, so the producer must evict. */
+			struct timespec s = {0, 300000};
+			nanosleep(&s, NULL);
+		}
 		uint64_t dropped;
 		size_t n = rtc_ring_read(&r, 0, dst, 2048, recs, 256, NULL, NULL, &dropped);
 		gaps += dropped;

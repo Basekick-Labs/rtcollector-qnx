@@ -18,6 +18,12 @@ VERSION ?= 0.1.0-dev
 BUILD_EPOCH := $(shell date +%s)
 
 UNAME := $(shell uname -s)
+# Linux kernels with high mmap randomisation crash TSan at startup; run it
+# with address randomisation off.
+TSAN_RUN :=
+ifeq ($(UNAME),Linux)
+  TSAN_RUN := setarch $(shell uname -m) -R
+endif
 ifeq ($(UNAME),Darwin)
   BREW    := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
   DEPS_CFLAGS := -I$(BREW)/include
@@ -68,7 +74,7 @@ test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
 
 tsan:
 	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests
-	build-tsan/rtc_tests ring
+	$(TSAN_RUN) build-tsan/rtc_tests ring
 
 FMT_FILES := $(shell find src tests -name '*.[ch]')
 

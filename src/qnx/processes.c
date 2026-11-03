@@ -22,6 +22,7 @@
 #include <sys/procfs.h>
 #include <unistd.h>
 
+/* Singleton state, see cpu.c. */
 static struct {
 	bool can_query;
 	unsigned round;
@@ -64,11 +65,17 @@ static int gather(rtc_collector *c)
 		char path[64];
 		snprintf(path, sizeof(path), "/proc/%ld/as", pid);
 		int fd = open(path, O_RDONLY);
-		if (fd < 0)
-			continue; /* exited since readdir (ENOENT), or not ours to read */
+		if (fd < 0) {
+			if (errno != ENOENT && errno != ESRCH) /* exited since readdir: not an error */
+				rtc_counter_add(&c->counters.processes_query_errors, 1);
+			continue;
+		}
 		procfs_info info;
-		if (devctl(fd, DCMD_PROC_INFO, &info, sizeof(info), NULL) == EOK)
+		int rc = devctl(fd, DCMD_PROC_INFO, &info, sizeof(info), NULL);
+		if (rc == EOK)
 			threads += info.num_threads;
+		else if (rc != ENOENT && rc != ESRCH)
+			rtc_counter_add(&c->counters.processes_query_errors, 1);
 		close(fd);
 	}
 	closedir(d);
@@ -79,6 +86,8 @@ static int gather(rtc_collector *c)
 	rtc_rb_i64(&b, "processes", (int64_t)procs);
 	if (st.can_query)
 		rtc_rb_i64(&b, "threads", (int64_t)threads);
+	if (overflow)
+		rtc_rb_bool(&b, "truncated", true); /* counts stop at max_processes */
 	rtc_emit(c, &b);
 	return 0;
 }

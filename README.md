@@ -13,7 +13,8 @@ operating system around one rule:
 
 ## Status
 
-Pre-alpha. Nothing here runs yet. This repository is Basekick Labs' entry to the
+Pre-alpha. Runs on QNX 8.0 (tested on x86_64 under QEMU; Raspberry Pi next) and on
+macOS/Linux for development. This repository is Basekick Labs' entry to the
 [QNX Global Hackathon](https://qnx.devpost.com/) (submission deadline
 2026-12-15). Targets: Raspberry Pi 5 (aarch64) and QEMU (x86_64), QNX SDP 8.0.
 
@@ -54,7 +55,7 @@ tools (a CPU hog pinned to each core, `pidin` memory and process counts).
 | Input | Measurement | What |
 |---|---|---|
 | `internal` | `internal_collector`, `internal_output` | The collector's own counters. Always on |
-| `cpu` (QNX) | `cpu`, tag `cpu` = `cpu0`…, `cpu-total` | `usage_percent`, `idle_percent`, from the run time of procnto's per-CPU idle threads. Needs no privileges |
+| `cpu` (QNX) | `cpu`, tag `cpu` = `cpu0`…, `cpu-total` | `usage_percent`, `idle_percent`, from the run time of procnto's per-CPU idle threads. Needs no privileges. CPUs taken offline at run time are not handled |
 | `mem` (QNX) | `mem` | `total_bytes`, `free_bytes`, `used_bytes`, `used_percent` |
 | `processes` (QNX) | `processes` | `processes`, and `threads` when the collector may query other processes (root, or `PROCMGR_AID_XPROCESS_QUERY`). Without it, `internal_collector.procfs_denied` is 1 and only the process count is sent |
 
@@ -91,7 +92,7 @@ outputs:
 | `warn_on_buffer` | `true` | Log when records are dropped because the buffer was full |
 | `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; a request still running then is cut off, and whatever was not sent is counted as dropped |
 | `collect_priority` | `10` | QNX: priority of the collection thread (SCHED_RR, 1–253). Keep it below your real-time threads. Above 63 needs root or `PROCMGR_AID_PRIORITY`; otherwise the thread keeps the inherited priority and `priority_fallback` is counted |
-| `send_priority` | `9` | QNX: priority of the sender thread |
+| `send_priority` | `9` | QNX: priority of the sender thread. With `--once` everything runs on the main thread and neither priority applies |
 | `processes_every` | `6` | Rounds between process scans (a scan costs about 50 µs per process) |
 | `max_processes` | `4096` | A scan stops here; `processes_overflow` is counted |
 | `debug` | `false` | Verbose logging (same as `-d`) |

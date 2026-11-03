@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 #include <yaml.h>
 
 #define C "config"
@@ -244,9 +245,10 @@ static void load_doc(ctx *x, rtc_config *c)
 			if (t != floor(t))
 				err(x, k, "must be an integer");
 			else if (!strcmp(k, "collect_priority"))
-				c->collect_priority = (int)t;
+				c->collect_priority =
+				    t >= 0 && t <= 1000 ? (int)t : -1; /* range-checked in validate */
 			else if (!strcmp(k, "send_priority"))
-				c->send_priority = (int)t;
+				c->send_priority = t >= 0 && t <= 1000 ? (int)t : -1;
 			else if (!strcmp(k, "processes_every"))
 				c->processes_every = t >= 0 && t <= 1000000 ? (unsigned)t : 0;
 			else
@@ -450,6 +452,11 @@ int rtc_config_validate(rtc_config *c)
 	if (c->arc.enabled) {
 		if (strncmp(c->arc.url, "http://", 7) && strncmp(c->arc.url, "https://", 8)) {
 			RTC_ERROR(C, "outputs.arc.url: must start with http:// or https://");
+			bad++;
+		}
+		if (c->arc.ca_file[0] && access(c->arc.ca_file, R_OK) != 0) {
+			RTC_ERROR(C, "outputs.arc.ca_file: cannot read %s: %s", c->arc.ca_file,
+			          strerror(errno));
 			bad++;
 		}
 		if (!rtc_valid_arc_name(c->arc.database, strlen(c->arc.database), 64)) {

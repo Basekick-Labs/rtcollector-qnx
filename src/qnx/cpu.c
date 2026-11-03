@@ -28,18 +28,17 @@
 
 #define MAX_CPUS 64
 
+/* File-static state: one collector per process, so each input's state is a
+ * singleton (documented in CLAUDE.md). Collection thread only. */
 static struct {
 	unsigned ncpu;
 	clockid_t id[MAX_CPUS];
+	bool usable[MAX_CPUS];    /* ClockId worked at init */
+	bool have_base[MAX_CPUS]; /* idle[i]/wall[i] hold a valid baseline */
 	uint64_t idle[MAX_CPUS];
-	uint64_t wall;
-	bool ok[MAX_CPUS];
+	uint64_t wall[MAX_CPUS];
+	bool first_round;
 } st;
-
-static bool read_idle(unsigned i, uint64_t *ns)
-{
-	return st.ok[i] && ClockTime(st.id[i], NULL, ns) == 0;
-}
 
 /* With procfs access (root), confirm the idle-thread convention once. */
 static void verify_idle_threads(void)
@@ -50,59 +49,81 @@ static void verify_idle_threads(void)
 	for (unsigned i = 0; i < st.ncpu; i++) {
 		procfs_status s = {0};
 		s.tid = (pthread_t)(i + 1);
-		if (devctl(fd, DCMD_PROC_TIDSTATUS, &s, sizeof(s), NULL) != EOK ||
-		    s.tid != (pthread_t)(i + 1) || s.priority != 0 || s.policy != SCHED_FIFO) {
-			RTC_WARN("cpu",
-			         "procnto thread %u is not an idle thread (prio %u, policy %u); cpu%u may be "
-			         "wrong",
-			         i + 1, (unsigned)s.priority, (unsigned)s.policy, i);
-		}
+		int rc = devctl(fd, DCMD_PROC_TIDSTATUS, &s, sizeof(s), NULL);
+		if (rc != EOK)
+			RTC_WARN("cpu", "cannot check procnto thread %u: %s", i + 1, strerror(rc));
+		else if (s.tid != (pthread_t)(i + 1) || s.priority != 0 || s.policy != SCHED_FIFO)
+			RTC_WARN(
+			    "cpu",
+			    "procnto thread %u is not an idle thread (tid %u, prio %u, policy %u); cpu%u "
+			    "may be wrong",
+			    i + 1, (unsigned)s.tid, (unsigned)s.priority, (unsigned)s.policy, i);
 	}
 	close(fd);
+}
+
+static void rebase(unsigned i, uint64_t wall)
+{
+	st.have_base[i] = ClockTime(st.id[i], NULL, &st.idle[i]) == 0;
+	st.wall[i] = wall;
 }
 
 static int init(rtc_collector *c)
 {
 	(void)c;
 	st.ncpu = _syspage_ptr->num_cpu;
-	if (st.ncpu > MAX_CPUS)
+	if (st.ncpu > MAX_CPUS) {
+		RTC_WARN("cpu", "%u CPUs; reporting the first %u", st.ncpu, MAX_CPUS);
 		st.ncpu = MAX_CPUS;
+	}
+	uint64_t wall = rtc_mono_ns();
 	for (unsigned i = 0; i < st.ncpu; i++) {
 		int id = ClockId(1, (int)i + 1);
-		st.ok[i] = id != -1;
+		st.usable[i] = id != -1;
 		st.id[i] = id;
-		if (!read_idle(i, &st.idle[i])) {
-			st.ok[i] = false;
+		if (st.usable[i])
+			rebase(i, wall);
+		if (!st.usable[i] || !st.have_base[i])
 			RTC_WARN("cpu", "cannot read the idle time of cpu%u: %s", i, strerror(errno));
-		}
 	}
-	st.wall = rtc_mono_ns();
+	st.first_round = true;
 	verify_idle_threads();
 	return 0;
 }
 
 static int gather(rtc_collector *c)
 {
-	uint64_t wall = rtc_mono_ns();
-	/* The first round follows init closely (with --once, immediately): give
-	 * it a window long enough to mean something. Only ever the first round. */
-	if (wall - st.wall < 100000000u) {
-		uint64_t left = 100000000u - (wall - st.wall);
-		struct timespec ts = {0, (long)left};
-		nanosleep(&ts, NULL);
-		wall = rtc_mono_ns();
+	if (st.first_round) {
+		/* The first round follows init closely (with --once, immediately):
+		 * give it a window long enough to mean something. */
+		st.first_round = false;
+		uint64_t since = rtc_mono_ns() - st.wall[0];
+		if (since < 100000000u) {
+			struct timespec ts = {0, (long)(100000000u - since)};
+			nanosleep(&ts, NULL);
+		}
 	}
 	double sum = 0;
 	unsigned n = 0;
 	int rc = 0;
 	for (unsigned i = 0; i < st.ncpu; i++) {
-		uint64_t idle;
-		if (!read_idle(i, &idle)) {
+		if (!st.usable[i])
+			continue; /* reported once at init */
+		uint64_t wall = rtc_mono_ns(), idle;
+		if (ClockTime(st.id[i], NULL, &idle) != 0) {
+			st.have_base[i] = false; /* re-baseline on the next good read */
 			rc = -1;
 			continue;
 		}
-		double u = rtc_cpu_usage_percent(st.idle[i], idle, st.wall, wall);
+		if (!st.have_base[i]) {
+			st.idle[i] = idle;
+			st.wall[i] = wall;
+			st.have_base[i] = true;
+			continue;
+		}
+		double u = rtc_cpu_usage_percent(st.idle[i], idle, st.wall[i], wall);
 		st.idle[i] = idle;
+		st.wall[i] = wall;
 		if (u < 0)
 			continue;
 		char tag[16];
@@ -116,7 +137,6 @@ static int gather(rtc_collector *c)
 		sum += u;
 		n++;
 	}
-	st.wall = wall;
 	if (n) {
 		rtc_rec_builder b;
 		rtc_rb_init(&b, c->scratch, c->cfg.max_record_bytes, "cpu");

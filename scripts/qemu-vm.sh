@@ -8,8 +8,8 @@
 #
 # mkqnximage only builds: its own runner needs a host bridge (brctl, setuid
 # qemu-bridge-helper, br0, dnsmasq). This runs QEMU with user-mode
-# networking instead. From the guest, the host is 10.0.2.2 (Arc at
-# 10.0.2.2:8000). The serial console is a TCP port on the host; drive it
+# networking instead. From the guest, the host is 10.0.2.2 (an Arc on the
+# host's port P is http://10.0.2.2:P). The serial console is a TCP port on the host; drive it
 # with scripts/qnx-serial.py. ssh on the default image is broken (sshd-auth
 # is missing), so files are pulled from the host over HTTP with the target's
 # own curl.

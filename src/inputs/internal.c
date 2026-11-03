@@ -34,6 +34,7 @@ static int gather(rtc_collector *c)
 	F(&b, "gather_errors", &k->gather_errors);
 	F(&b, "procfs_denied", &k->procfs_denied);
 	F(&b, "processes_overflow", &k->processes_overflow);
+	F(&b, "processes_query_errors", &k->processes_query_errors);
 	F(&b, "priority_fallback", &k->priority_fallback);
 	rtc_rb_i64(&b, "buffer_bytes", clamp(c->ring.cap));
 	rtc_emit(c, &b);

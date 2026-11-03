@@ -58,7 +58,7 @@ def main():
         tag = uuid.uuid4().hex[:12]
         line = f"echo BEGIN{tag}; {cmd}; echo END{tag} $?\r"
         s.sendall(line.encode())
-        buf, m = read_until(s, (rf"END{tag} (\d+)").encode(), a.timeout)
+        buf, m = read_until(s, (rf"END{tag} (\d+)\r?\n").encode(), a.timeout)
         if not m:
             sys.stdout.write(buf.decode(errors="replace"))
             print(f"\n[timeout after {a.timeout}s: {cmd}]", file=sys.stderr)

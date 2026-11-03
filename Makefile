@@ -55,10 +55,11 @@ else
   LDLIBS += $(DEPS_LIBS) -lyaml -lcurl -lzstd -lpthread -lm
 endif
 
-# Upstream code: its own warnings are not ours to fix (-w), but an implicit
-# declaration must stay an error: under strict C11 without POSIX, strdup is
-# undeclared, its result is truncated to int, and libyaml crashes on 64-bit.
-THIRD_PARTY_CFLAGS := -O2 -g -std=c11 -D_POSIX_C_SOURCE=200809L -w -Werror=implicit-function-declaration \
+# Upstream code: no -Wall/-Werror of ours, but an implicit declaration must
+# stay an error: under strict C11 without POSIX, strdup is undeclared, its
+# result is truncated to int, and libyaml crashes on 64-bit. (No -w: with gcc
+# it would silence these -Werror= too. libyaml 0.2.5 is clean without it.)
+THIRD_PARTY_CFLAGS := -O2 -g -std=c11 -D_POSIX_C_SOURCE=200809L -Werror=implicit-function-declaration \
   -Werror=int-conversion -DYAML_DECLARE_STATIC -DYAML_VERSION_MAJOR=0 \
   -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING=\"0.2.5\" -Ithird_party/libyaml/include
 
@@ -129,4 +130,4 @@ qnx:
 clean:
 	rm -rf build build-tsan build-asan build-qnx-*
 
--include $(CORE_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+-include $(CORE_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(BUILD)/src/main.d

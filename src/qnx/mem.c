@@ -13,18 +13,23 @@
 #include <sys/stat.h>
 #include <sys/syspage.h>
 
-static uint64_t total_ram;
+static uint64_t total_ram; /* singleton state, see cpu.c */
 
 static int init(rtc_collector *c)
 {
 	(void)c;
-	const struct asinfo_entry *as = SYSPAGE_ENTRY(asinfo);
+	/* Walk with the system page's own element size, not sizeof: the
+	 * kernel may describe larger entries than this header's struct. */
+	const char *base = (const char *)SYSPAGE_ENTRY(asinfo);
+	unsigned esize = _syspage_ptr->asinfo.element_size;
 	const char *strings = SYSPAGE_ENTRY(strings)->data;
-	unsigned n = _syspage_ptr->asinfo.entry_size / sizeof(*as);
+	unsigned n = esize ? _syspage_ptr->asinfo.entry_size / esize : 0;
 	total_ram = 0;
-	for (unsigned i = 0; i < n; i++)
-		if (!strcmp(strings + as[i].name, "ram"))
-			total_ram += as[i].end - as[i].start + 1;
+	for (unsigned i = 0; i < n; i++) {
+		const struct asinfo_entry *as = (const struct asinfo_entry *)(base + (size_t)i * esize);
+		if (!strcmp(strings + as->name, "ram"))
+			total_ram += as->end - as->start + 1;
+	}
 	return 0;
 }
 

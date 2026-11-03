@@ -316,8 +316,9 @@ static int start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), int
 #ifdef RTC_QNX
 	pthread_attr_t a;
 	struct sched_param sp = {.sched_priority = prio};
-	if (pthread_attr_init(&a) == 0) {
-		int rc = pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
+	int rc = pthread_attr_init(&a);
+	if (rc == 0) {
+		rc = pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
 		if (rc == 0)
 			rc = pthread_attr_setschedpolicy(&a, SCHED_RR);
 		if (rc == 0)
@@ -327,10 +328,10 @@ static int start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), int
 		pthread_attr_destroy(&a);
 		if (rc == 0)
 			return 0;
-		RTC_WARN(C, "cannot run the %s thread at priority %d (%s); using the inherited priority",
-		         what, prio, strerror(rc));
-		rtc_counter_add(&c->counters.priority_fallback, 1);
 	}
+	RTC_WARN(C, "cannot run the %s thread at priority %d (%s); using the inherited priority", what, prio,
+	         strerror(rc));
+	rtc_counter_add(&c->counters.priority_fallback, 1);
 #else
 	(void)prio;
 	(void)what;

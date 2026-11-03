@@ -77,7 +77,7 @@ echo "$out" | grep -q '^cpu,.*cpu=cpu-total' && echo "$out" | grep -q '^processe
 	ok "non-root: cpu ok, processes without threads, procfs_denied=1" || { bad "non-root run"; echo "$out"; }
 
 # Priorities as configured (root), seen from outside with pidin.
-out=$(SER "./rtcollector --config prio.yml >/dev/null 2>&1 & P=\$!; sleep 2; pidin -p \$P -F '%h %J' ; kill \$P")
+out=$(SER "./rtcollector --config prio.yml >/dev/null 2>&1 & P=\$!; sleep 2; pidin -p \$P -F '%b %p %J' ; kill \$P")
 echo "$out" | grep -q ' 12r ' && echo "$out" | grep -q ' 8r ' && ok "thread priorities 12r/8r" || { bad "thread priorities"; echo "$out"; }
 
 exit $fail

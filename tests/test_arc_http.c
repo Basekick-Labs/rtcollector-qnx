@@ -439,7 +439,30 @@ static void once_exit_codes(void)
 	teardown();
 }
 
+/* Arc failing through shutdown: what was never sent is counted as dropped,
+ * so sent + dropped covers everything gathered. */
+static void shutdown_counts_unsent_as_dropped(void)
+{
+	fake_reply s[32];
+	for (int i = 0; i < 32; i++)
+		s[i] = (fake_reply){503, "{}"};
+	CHECK(setup(s, 32, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.interval_s = 0.02;
+	R.c.cfg.flush_interval_s = 0.02;
+	R.c.cfg.shutdown_timeout_s = 0.2;
+	CHECK(rtc_collector_start(&R.c) == 0);
+	struct timespec ts = {0, 300000000};
+	nanosleep(&ts, NULL);
+	rtc_collector_stop(&R.c);
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK(gathered > 5);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 0);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_dropped), gathered);
+	teardown();
+}
+
 const t_case lifecycle_cases[] = {
+    {"lifecycle", "shutdown_counts_unsent_as_dropped", shutdown_counts_unsent_as_dropped},
     {"lifecycle", "shutdown_budget_bounds_a_hanging_request", shutdown_budget_bounds_a_hanging_request},
     {"lifecycle", "threads_deliver_and_stop_cleanly", threads_deliver_and_stop_cleanly},
     {"lifecycle", "once_exit_codes", once_exit_codes},

@@ -1,7 +1,7 @@
 /* Test client for /dev/rtcollector (QNX). Writes N lines in one of several
  * client idioms and reports write() latency.
  *
- *   rtc_writer [-p path] [-n lines] [-m publish|snprintf|dprintf] [-s measurement]
+ *   rtc_writer [-p path] [-n lines] [-m publish|snprintf|dprintf|pwrite|zero|big] [-s measurement]
  *              [-u sleep_us] [-t] [-T explicit_ts_ns]
  *
  * -t prints p50/p99/max write latency in microseconds. Exit status: 0 if
@@ -59,7 +59,19 @@ int main(int argc, char **argv)
 	for (long i = 0; i < n; i++) {
 		uint64_t t0 = now_ns();
 		int rc;
-		if (!strcmp(mode, "dprintf")) {
+		if (!strcmp(mode, "zero")) {
+			rc = (int)write(fd, "", 0);
+		} else if (!strcmp(mode, "pwrite")) {
+			char line[128];
+			int len = snprintf(line, sizeof(line), "%s,mode=pwrite seq=%ldi\n", m, i);
+			rc = (int)pwrite(fd, line, (size_t)len, 12345);
+		} else if (!strcmp(mode, "big")) {
+			static char line[8192];
+			memset(line, 'x', sizeof(line));
+			rc = (int)write(fd, line, sizeof(line));
+			if (rc < 0)
+				printf("errno=%d %s\n", errno, strerror(errno));
+		} else if (!strcmp(mode, "dprintf")) {
 			rc = dprintf(fd, "%s,mode=dprintf seq=%ldi\n", m, i);
 		} else if (!strcmp(mode, "snprintf")) {
 			char line[256];

@@ -303,8 +303,9 @@ static void outputs_progress_independently(void)
 	stdout = fopen("/dev/null", "w");
 	emit("cpu", 4);
 	rtc_sender_pass(&R.c, false, 0); /* not final: arc backs off after one 503 */
-	R.c.outputs[0]->last_flush_ns = 0;
-	R.c.outputs[1]->last_flush_ns = 0;
+	uint64_t long_ago = rtc_mono_ns() - (uint64_t)(R.c.cfg.flush_interval_s * 1e9) - 1;
+	R.c.outputs[0]->last_flush_ns = long_ago;
+	R.c.outputs[1]->last_flush_ns = long_ago;
 	rtc_sender_pass(&R.c, false, 0);
 	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[1]->counters.records_sent), 4);
 	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[0]->counters.records_sent), 0);
@@ -339,7 +340,9 @@ static void flush_drains_backlog_in_one_pass(void)
 	emit("cpu", 1);
 	emit("mem", 1);
 	emit("disk", 1);
-	R.c.outputs[0]->last_flush_ns = 0; /* the flush is due now */
+	/* Make the flush due. Relative to now: CLOCK_MONOTONIC can be smaller than
+	 * flush_interval on a freshly booted machine (CI). */
+	R.c.outputs[0]->last_flush_ns = rtc_mono_ns() - 3600000000000ull - 1;
 	rtc_sender_pass(&R.c, false, 0);
 	CHECK_EQ_U(fake_arc_requests(R.f), 3);
 	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 3);

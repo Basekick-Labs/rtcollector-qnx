@@ -21,7 +21,7 @@ got=$(SER "cd /tmp && rm -f rtcollector rtc_writer && for f in rtcollector rtc_w
 [ "$got" = "$want" ] && ok "deployed (cksum $want)" || { bad "deploy: cksum $got vs $want"; exit 1; }
 
 # The collector, in the background, for the whole run.
-SER "slay -f rtcollector >/dev/null 2>&1; rm -f /tmp/rm.out; ./rtcollector --config rmgr.yml > /tmp/rm.out 2>&1 & echo \$! > /tmp/rm.pid; sleep 1; ls -l /dev/rtcollector" | grep -q '^crw-rw-rw-' && ok "device registered, mode 0666" || bad "device not registered"
+SER "slay -s SIGKILL rtcollector >/dev/null 2>&1; sleep 0.5; rm -f /tmp/rm.out; ./rtcollector --config rmgr.yml > /tmp/rm.out 2>&1 & echo \$! > /tmp/rm.pid; sleep 1; ls -l /dev/rtcollector" | grep -q '^crw-rw-rw-' && ok "device registered, mode 0666" || bad "device not registered"
 
 now=$(date +%s)000000000
 past=$((now - 3600 * 1000000000))

@@ -58,6 +58,57 @@ tools (a CPU hog pinned to each core, `pidin` memory and process counts).
 | `cpu` (QNX) | `cpu`, tag `cpu` = `cpu0`…, `cpu-total` | `usage_percent`, `idle_percent`, from the run time of procnto's per-CPU idle threads. Needs no privileges. CPUs taken offline at run time are not handled |
 | `mem` (QNX) | `mem` | `total_bytes`, `free_bytes`, `used_bytes`, `used_percent` |
 | `processes` (QNX) | `processes` | `processes`, and `threads` when the collector may query other processes (root, or `PROCMGR_AID_XPROCESS_QUERY`). Without it, `internal_collector.procfs_denied` is 1 and only the process count is sent |
+| `rmgr` (QNX) | what programs write | `/dev/rtcollector`: any program publishes metrics by writing line protocol to it. See below |
+
+## Publishing from your program: `/dev/rtcollector`
+
+With `rmgr` in `inputs`, the collector registers `/dev/rtcollector`. Any QNX
+program publishes a metric by writing one line of
+[line protocol](https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/)
+per `write()`:
+
+```c
+#include "rtc_publish.h"   /* include/rtc_publish.h: header-only */
+
+int fd = open("/dev/rtcollector", O_WRONLY);
+rtc_publish(fd, "control_loop,axis=x jitter_us=%di,ok=true", jitter_us);
+```
+
+or, without the header, `snprintf` into a buffer and one `write()`. Shell:
+`echo 'pump,id=3 rpm=1450i' > /dev/rtcollector`.
+
+**Do not use `dprintf` or default-buffered stdio.** On QNX, `dprintf` sends
+literal text one character per `write()`, and buffered `fprintf` cuts lines
+at 1 KiB. The collector does not reassemble lines split across writes; such
+fragments are counted as malformed.
+
+What a write costs and what it promises:
+
+- The handler copies the bytes into a preallocated buffer and replies. It
+  runs at the writer's priority (QNX priority inheritance), so a real-time
+  writer is never delayed by lower-priority work. Measured on QEMU/KVM: a
+  priority-50 writer with a priority-30 CPU hog and a flooding priority-5
+  writer on the same core: p99 9 µs, max 12 µs.
+- A write waits for the handler in progress plus one handler run per queued
+  writer at equal or higher priority, while the collector runs. If the
+  collector is stopped (SIGSTOP), writes block; after it exits, they fail
+  with `EBADF` (reopen the device).
+- Writes longer than `max_write_bytes` fail with `EMSGSIZE`. Anything else
+  succeeds: data lost because the buffer is full is counted, never reported
+  to the writer.
+- Lines are parsed on the collection thread, not in `write()`. Fields:
+  float, `123i` integer, `123u` unsigned (dropped if above 2^63−1), booleans
+  (`t`, `true`, `True`, `TRUE`, `f`, …), `"strings"`. An explicit timestamp
+  must be in nanoseconds (others are refused and counted); without one, the
+  receive time is used. A tag `host` replaces the collector's host tag.
+- `cat /dev/rtcollector` prints one status line: writes, bytes, dropped,
+  oversize, lines, malformed, bad timestamps and the highest writer priority
+  seen.
+
+Registering a path needs root (or `PROCMGR_AID_PATHSPACE`); without it the
+collector runs without `/dev/rtcollector` and `rmgr_unavailable` is 1. A
+second collector refuses a path that is already registered. `--once` does not
+start it.
 
 ## Running
 
@@ -95,6 +146,12 @@ outputs:
 | `send_priority` | `9` | QNX: priority of the sender thread. With `--once` everything runs on the main thread and neither priority applies |
 | `processes_every` | `6` | Rounds between process scans (a scan costs about 50 µs per process) |
 | `max_processes` | `4096` | A scan stops here; `processes_overflow` is counted |
+| `rmgr_path` | `/dev/rtcollector` | Path of the device (input `rmgr`) |
+| `rmgr_mode` | `0660` | Its permissions, octal. `0666` lets any user publish (and flood) |
+| `rmgr_group` | `0` | Its group id |
+| `rmgr_buffer_bytes` | `256KiB` | Buffer between the device and the collection thread |
+| `max_write_bytes` | `4096` | Largest write accepted |
+| `rmgr_drain_bytes` | `64KiB` | Bytes converted per collection-thread step (every 20 ms at most) |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |

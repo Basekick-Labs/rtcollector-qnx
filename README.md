@@ -19,8 +19,7 @@ Pre-alpha. Nothing here runs yet. This repository is Basekick Labs' entry to the
 
 ## Building
 
-The portable core builds and runs on macOS and Linux today; the QNX 8.0 build
-(Raspberry Pi 5, QEMU) lands next.
+Host build (macOS, Linux), for development and tests:
 
 ```sh
 # macOS: brew install libyaml zstd        Linux: apt install libyaml-dev libzstd-dev libcurl4-openssl-dev
@@ -29,6 +28,35 @@ make test             # unit and integration tests
 make test SANITIZE=1  # with AddressSanitizer + UBSan
 make tsan             # concurrency tests under ThreadSanitizer
 ```
+
+QNX 8.0 build, with QNX SDP 8.0 installed (QNX Everywhere):
+
+```sh
+source ~/qnx800/qnxsdp-env.sh
+make qnx ARCH=x86_64      # build-qnx-x86_64/rtcollector (QEMU)
+make qnx ARCH=aarch64le   # build-qnx-aarch64le/rtcollector (Raspberry Pi)
+```
+
+The QNX binary needs `libcurl.so.12` on the target (present on the standard
+QNX images); zstd and libyaml are linked in. libyaml 0.2.5 is vendored in
+`third_party/libyaml` because the SDP does not ship it.
+
+### Trying it on QEMU
+
+`scripts/qemu-vm.sh build|run|stop` builds a QNX 8.0 x86_64 image with
+`mkqnximage` and runs it under QEMU with user networking: from the VM, the
+host is `10.0.2.2`. `scripts/qnx-serial.py` runs commands over the VM's serial
+console, and `scripts/qnx-validate.sh` checks the inputs against QNX's own
+tools (a CPU hog pinned to each core, `pidin` memory and process counts).
+
+## Inputs
+
+| Input | Measurement | What |
+|---|---|---|
+| `internal` | `internal_collector`, `internal_output` | The collector's own counters. Always on |
+| `cpu` (QNX) | `cpu`, tag `cpu` = `cpu0`…, `cpu-total` | `usage_percent`, `idle_percent`, from the run time of procnto's per-CPU idle threads. Needs no privileges |
+| `mem` (QNX) | `mem` | `total_bytes`, `free_bytes`, `used_bytes`, `used_percent` |
+| `processes` (QNX) | `processes` | `processes`, and `threads` when the collector may query other processes (root, or `PROCMGR_AID_XPROCESS_QUERY`). Without it, `internal_collector.procfs_denied` is 1 and only the process count is sent |
 
 ## Running
 
@@ -62,12 +90,17 @@ outputs:
 | `tags` | none | Tags added to every row; they take precedence over tags an input sets |
 | `warn_on_buffer` | `true` | Log when records are dropped because the buffer was full |
 | `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; a request still running then is cut off, and whatever was not sent is counted as dropped |
+| `collect_priority` | `10` | QNX: priority of the collection thread (SCHED_RR, 1–253). Keep it below your real-time threads. Above 63 needs root or `PROCMGR_AID_PRIORITY`; otherwise the thread keeps the inherited priority and `priority_fallback` is counted |
+| `send_priority` | `9` | QNX: priority of the sender thread |
+| `processes_every` | `6` | Rounds between process scans (a scan costs about 50 µs per process) |
+| `max_processes` | `4096` | A scan stops here; `processes_overflow` is counted |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |
 | `outputs.arc.url` | required | Arc base URL |
 | `outputs.arc.database` | `default` | Arc database (`x-arc-database`) |
 | `outputs.arc.token` | none | Arc API token; `RTC_ARC_TOKEN` overrides it. rtcollector's `secret:` references are not supported |
+| `outputs.arc.ca_file` | none | CA bundle for https (QNX images ship none) |
 | `outputs.arc.batch_bytes` | `256KiB` | Bytes of records per request, at most (default capped at half of `buffer_bytes`) |
 | `outputs.arc.timeout` | `10` | Request timeout, seconds |
 | `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request (1 to 256) |

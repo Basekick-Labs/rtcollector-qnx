@@ -19,8 +19,69 @@ Pre-alpha. Nothing here runs yet. This repository is Basekick Labs' entry to the
 
 ## Building
 
-Build and run instructions for QNX SDP 8.0 (Raspberry Pi 5 and QEMU) land with
-the first code. Configuration follows rtcollector's YAML format.
+The portable core builds and runs on macOS and Linux today; the QNX 8.0 build
+(Raspberry Pi 5, QEMU) lands next.
+
+```sh
+# macOS: brew install libyaml zstd        Linux: apt install libyaml-dev libzstd-dev libcurl4-openssl-dev
+make                  # build/rtcollector
+make test             # unit and integration tests
+make test SANITIZE=1  # with AddressSanitizer + UBSan
+make tsan             # concurrency tests under ThreadSanitizer
+```
+
+## Running
+
+```sh
+build/rtcollector --config rtcollector.yml          # run until SIGINT/SIGTERM
+build/rtcollector --config rtcollector.yml --once   # one round, one send; exit 0 only if nothing was lost
+```
+
+A minimal configuration, in rtcollector's YAML format:
+
+```yaml
+interval: 10          # seconds between collection rounds
+flush_interval: 10    # seconds between sends (a full batch is sent sooner)
+buffer_bytes: 1MiB    # fixed buffer, allocated once at startup
+tags:
+  site: lab
+outputs:
+  - arc:
+      url: http://localhost:8000
+      database: telemetry
+      # token: ...   or set RTC_ARC_TOKEN
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `interval` | `10` | Seconds between collection rounds |
+| `flush_interval` | `interval` | Seconds between sends; a send also happens when a batch is full |
+| `buffer_bytes` | `1MiB` | Size of the buffer between collection and sending, allocated once. When it is full the oldest records are dropped; if an output is copying those at that moment, the newest record is dropped instead. Every drop is counted |
+| `max_record_bytes` | `4096` | Largest record an input may produce (at least 512) |
+| `hostname` | system hostname | Value of the `host` tag on every row |
+| `tags` | none | Tags added to every row; they take precedence over tags an input sets |
+| `warn_on_buffer` | `true` | Log when records are dropped because the buffer was full |
+| `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; a request still running then is cut off, and whatever was not sent is counted as dropped |
+| `debug` | `false` | Verbose logging (same as `-d`) |
+| `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
+| `once` | `false` | Same as `--once` |
+| `outputs.arc.url` | required | Arc base URL |
+| `outputs.arc.database` | `default` | Arc database (`x-arc-database`) |
+| `outputs.arc.token` | none | Arc API token; `RTC_ARC_TOKEN` overrides it. rtcollector's `secret:` references are not supported |
+| `outputs.arc.batch_bytes` | `256KiB` | Bytes of records per request, at most (default capped at half of `buffer_bytes`) |
+| `outputs.arc.timeout` | `10` | Request timeout, seconds |
+| `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request (1 to 256) |
+| `outputs.stdout` | off | Print rows as line protocol, for debugging |
+| `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records per write |
+
+`max_buffer_size` from rtcollector configurations is accepted and ignored:
+rtcollector counted single-value series, this collector buffers multi-field
+rows.
+
+Data goes to Arc as columnar MessagePack (`POST /api/v1/write/msgpack`,
+zstd-compressed), one item per measurement per request. The collector reports
+on itself in two measurements, `internal_collector` and `internal_output`:
+records gathered, sent, dropped and rejected, retries and the last HTTP status.
 
 ## Licence
 

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host:
+    name: Host build and tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libyaml-dev libzstd-dev libcurl4-openssl-dev clang-format cppcheck
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libyaml zstd clang-format cppcheck
+      - name: Format
+        run: make format-check
+      - name: Lint
+        run: make lint
+      - name: Build and test
+        run: make test
+      - name: AddressSanitizer + UBSan
+        run: make test SANITIZE=1 BUILD=build-asan
+      - name: ThreadSanitizer (ring)
+        run: make tsan

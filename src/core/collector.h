@@ -25,7 +25,7 @@ typedef struct {
 } rtc_input_def;
 
 enum rtc_send_outcome {
-	RTC_SEND_DONE,	/* batch fully accounted for */
+	RTC_SEND_DONE,  /* batch fully accounted for */
 	RTC_SEND_AGAIN, /* more of the batch to send now (split, or rest after success) */
 	RTC_SEND_RETRY, /* keep the batch, back off */
 };
@@ -90,8 +90,8 @@ int rtc_collector_run_once(rtc_collector *c);
 
 /* Collection-thread helpers for inputs. */
 void rtc_emit(rtc_collector *c, rtc_rec_builder *b);
-uint64_t rtc_now_ns(void);	 /* CLOCK_REALTIME */
-uint64_t rtc_mono_ns(void);	 /* CLOCK_MONOTONIC */
+uint64_t rtc_now_ns(void);  /* CLOCK_REALTIME */
+uint64_t rtc_mono_ns(void); /* CLOCK_MONOTONIC */
 const char *rtc_hostname(const rtc_collector *c);
 
 /* Shared by outputs. */

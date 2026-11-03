@@ -11,7 +11,10 @@
 
 #include <stdint.h>
 
-static int64_t clamp(uint64_t v) { return v > INT64_MAX ? INT64_MAX : (int64_t)v; }
+static int64_t clamp(uint64_t v)
+{
+	return v > INT64_MAX ? INT64_MAX : (int64_t)v;
+}
 
 #define F(b, name, ctr) rtc_rb_i64(b, name, clamp(rtc_counter_get(ctr)))
 

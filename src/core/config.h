@@ -23,7 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RTC_CFG_MAX_TAGS 16
+#define RTC_CFG_MAX_TAGS   16
 #define RTC_CFG_MAX_INPUTS 16
 
 typedef struct {

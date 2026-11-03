@@ -9,6 +9,9 @@
 #
 # QNX targets (make qnx ARCH=aarch64le|x86_64) arrive with the QNX layer.
 
+SHELL      := /bin/bash
+.SHELLFLAGS := -o pipefail -c
+
 CC      ?= cc
 BUILD   ?= build
 VERSION ?= 0.1.0-dev
@@ -28,8 +31,12 @@ CFLAGS  += -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOUR
 LDLIBS  += $(DEPS_LIBS) -lyaml -lcurl -lzstd -lpthread -lm
 
 ifeq ($(SANITIZE),1)
-  CFLAGS  += -fsanitize=address,undefined -fno-omit-frame-pointer -O1
+  CFLAGS  += -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -DRTC_ASAN=1
   LDFLAGS += -fsanitize=address,undefined
+endif
+ifeq ($(SANITIZE),thread)
+  CFLAGS  += -fsanitize=thread -O1
+  LDFLAGS += -fsanitize=thread
 endif
 
 CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config.c \
@@ -57,10 +64,10 @@ $(BUILD)/rtc_tests: $(CORE_OBJ) $(TEST_OBJ)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
-	$(BUILD)/rtc_tests
+	$(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'
 
 tsan:
-	$(MAKE) BUILD=build-tsan CFLAGS="-O1 -g -fsanitize=thread" LDFLAGS="-fsanitize=thread" build-tsan/rtc_tests
+	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests
 	build-tsan/rtc_tests ring
 
 FMT_FILES := $(shell find src tests -name '*.[ch]')

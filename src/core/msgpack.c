@@ -81,7 +81,10 @@ void rtc_mp_str(rtc_mp *w, const char *s, size_t n)
 	put(w, s, n);
 }
 
-void rtc_mp_cstr(rtc_mp *w, const char *s) { rtc_mp_str(w, s, strlen(s)); }
+void rtc_mp_cstr(rtc_mp *w, const char *s)
+{
+	rtc_mp_str(w, s, strlen(s));
+}
 
 void rtc_mp_array(rtc_mp *w, uint32_t n)
 {

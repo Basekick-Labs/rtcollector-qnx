@@ -24,7 +24,7 @@ enum { RTC_REC_BIN = 1 };
 
 enum rtc_ftype { RTC_F_I64 = 1, RTC_F_F64 = 2, RTC_F_BOOL = 3, RTC_F_STR = 4 };
 
-#define RTC_REC_MAX_TAGS 32
+#define RTC_REC_MAX_TAGS   32
 #define RTC_REC_MAX_FIELDS 64
 
 typedef struct {

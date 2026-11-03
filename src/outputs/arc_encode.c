@@ -61,7 +61,10 @@ bool rtc_utf8_valid(const char *s, size_t n)
 	return true;
 }
 
-static bool str_eq(rtc_str a, const char *b, size_t bl) { return a.len == bl && memcmp(a.p, b, bl) == 0; }
+static bool str_eq(rtc_str a, const char *b, size_t bl)
+{
+	return a.len == bl && memcmp(a.p, b, bl) == 0;
+}
 
 static bool fold_eq(const char *a, size_t al, const char *b, size_t bl)
 {
@@ -118,7 +121,8 @@ typedef struct {
 } pend;
 
 /* Decide whether a row fits its group; on success commit its new columns. */
-static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsigned nin, rtc_output_counters *k)
+static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsigned nin,
+                  rtc_output_counters *k)
 {
 	pend p[RTC_REC_MAX_TAGS + RTC_REC_MAX_FIELDS];
 	unsigned np = 0, nfields = 0;
@@ -169,7 +173,8 @@ static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsign
 			rtc_arc_col *col = &g->cols[c];
 			if (!fold_eq(p[i].name.p, p[i].name.len, col->name.p, col->name.len))
 				continue;
-			if (col->name.len != p[i].name.len || memcmp(col->name.p, p[i].name.p, p[i].name.len)) {
+			if (col->name.len != p[i].name.len ||
+			    memcmp(col->name.p, p[i].name.p, p[i].name.len)) {
 				rtc_counter_add(&k->invalid_names, 1);
 				return false;
 			}
@@ -191,7 +196,8 @@ static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsign
 	}
 	for (unsigned i = 0; i < np; i++)
 		if (p[i].type & 0x80)
-			g->cols[g->ncols++] = (rtc_arc_col){p[i].name, p[i].is_tag, (uint8_t)(p[i].type & 0x7f)};
+			g->cols[g->ncols++] =
+			    (rtc_arc_col){p[i].name, p[i].is_tag, (uint8_t)(p[i].type & 0x7f)};
 	return true;
 }
 
@@ -214,8 +220,8 @@ static const rtc_field *field_value(const rtc_rec_view *v, rtc_str k)
 }
 
 size_t rtc_arc_encode(rtc_arc_enc *e, const rtc_config *cfg, const char *hostname, const rtc_ring_rec *recs,
-		      const uint8_t *done, size_t start, size_t n, uint8_t *verdict, rtc_output_counters *k,
-		      uint8_t *out, size_t cap)
+                      const uint8_t *done, size_t start, size_t n, uint8_t *verdict, rtc_output_counters *k,
+                      uint8_t *out, size_t cap)
 {
 	inj in[RTC_CFG_MAX_TAGS + 1];
 	unsigned nin = injected(cfg, in);

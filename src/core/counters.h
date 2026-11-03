@@ -48,8 +48,8 @@ typedef struct {
 /* Written by the sender thread, one set per output. */
 typedef struct {
 	rtc_counter records_sent;
-	rtc_counter records_dropped; /* evicted from the ring before this output read them */
-	rtc_counter records_rejected; /* refused by the destination or pre-validation */
+	rtc_counter records_dropped;        /* evicted from the ring before this output read them */
+	rtc_counter records_rejected;       /* refused by the destination or pre-validation */
 	rtc_counter points_dropped_partial; /* Arc "partial write: N points dropped" */
 	rtc_counter records_outcome_unknown;
 	rtc_counter requests;

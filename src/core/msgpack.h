@@ -16,7 +16,10 @@ typedef struct {
 } rtc_mp;
 
 void rtc_mp_init(rtc_mp *w, uint8_t *buf, size_t cap);
-static inline bool rtc_mp_ok(const rtc_mp *w) { return !w->failed; }
+static inline bool rtc_mp_ok(const rtc_mp *w)
+{
+	return !w->failed;
+}
 
 void rtc_mp_nil(rtc_mp *w);
 void rtc_mp_bool(rtc_mp *w, bool v);

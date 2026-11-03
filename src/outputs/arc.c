@@ -164,7 +164,7 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 	size_t n = o->nrecs - first < o->limit ? o->nrecs - first : o->limit;
 
 	size_t len = rtc_arc_encode(&a->enc, &c->cfg, c->cfg.hostname, o->recs, o->done, first, n, a->verdict,
-				    &o->counters, a->mp, a->mp_cap);
+	                            &o->counters, a->mp, a->mp_cap);
 	for (size_t i = first; i < first + n; i++)
 		if (a->verdict[i] == RTC_V_REJECTED) {
 			o->done[i] = 1;
@@ -199,18 +199,22 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 
 	if (cc != CURLE_OK) {
 		rtc_counter_add(&o->counters.request_errors, 1);
-		if (cc == CURLE_OPERATION_TIMEDOUT && timeout_cap_ms && timeout_cap_ms <= c->cfg.arc.timeout_ms) {
+		if (cc == CURLE_OPERATION_TIMEDOUT && timeout_cap_ms &&
+		    timeout_cap_ms <= c->cfg.arc.timeout_ms) {
 			/* Cut off by the shutdown budget: Arc may have written it. */
 			for (size_t i = first; i < first + n; i++)
 				if (a->verdict[i] == RTC_V_SENT)
 					o->done[i] = 1;
 			rtc_counter_add(&o->counters.records_outcome_unknown, in_req);
-			RTC_WARN(o->name, "shutdown: a request was cut off; %zu records may or may not be stored", in_req);
+			RTC_WARN(o->name,
+			         "shutdown: a request was cut off; %zu records may or may not be stored",
+			         in_req);
 			return remaining(o) ? RTC_SEND_AGAIN : RTC_SEND_DONE;
 		}
 		if (a->last_logged_status != -(long)cc) {
 			a->last_logged_status = -(long)cc;
-			RTC_WARN(o->name, "cannot reach Arc at %s: %s; retrying", a->url, curl_easy_strerror(cc));
+			RTC_WARN(o->name, "cannot reach Arc at %s: %s; retrying", a->url,
+			         curl_easy_strerror(cc));
 		}
 		return RTC_SEND_RETRY;
 	}
@@ -245,8 +249,9 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 	if (status == 401 || status == 403) {
 		if (!a->auth_logged) {
 			a->auth_logged = true;
-			RTC_ERROR(o->name, "Arc refused the token (HTTP %ld); keeping the data and retrying: %.300s",
-				  status, a->resp);
+			RTC_ERROR(o->name,
+			          "Arc refused the token (HTTP %ld); keeping the data and retrying: %.300s",
+			          status, a->resp);
 		}
 		return RTC_SEND_RETRY;
 	}
@@ -271,7 +276,8 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 			}
 		}
 		rtc_counter_add(&o->counters.records_sent, wrote);
-		log_status(o, status, "Arc stopped part-way; resending only the measurements it did not write");
+		log_status(o, status,
+		           "Arc stopped part-way; resending only the measurements it did not write");
 		if (++a->partial_resends > 1) {
 			size_t left = 0;
 			for (size_t i = first; i < first + n; i++)
@@ -336,7 +342,8 @@ int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out)
 	a->z = malloc(a->z_cap);
 	a->verdict = calloc(o->max_recs, 1);
 	a->zctx = ZSTD_createCCtx();
-	if (!a->mp || !a->z || !a->verdict || !a->zctx || rtc_arc_enc_init(&a->enc, o->max_recs, cfg->max_measurements))
+	if (!a->mp || !a->z || !a->verdict || !a->zctx ||
+	    rtc_arc_enc_init(&a->enc, o->max_recs, cfg->max_measurements))
 		goto fail;
 	ZSTD_CCtx_setParameter(a->zctx, ZSTD_c_compressionLevel, 3);
 

@@ -132,7 +132,7 @@ enum rtc_push_result rtc_ring_push(rtc_ring *r, const uint8_t *payload, uint32_t
 }
 
 size_t rtc_ring_read(rtc_ring *r, unsigned o, uint8_t *dst, size_t dst_cap, rtc_ring_rec *recs,
-		     size_t max_recs, rtc_ring_accept accept, void *accept_arg, uint64_t *dropped)
+                     size_t max_recs, rtc_ring_accept accept, void *accept_arg, uint64_t *dropped)
 {
 	uint64_t cur = r->cursor[o];
 	*dropped = 0;

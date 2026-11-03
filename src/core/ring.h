@@ -31,13 +31,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RTC_RING_HDR 20u
+#define RTC_RING_HDR         20u
 #define RTC_RING_MAX_OUTPUTS 4
-#define RTC_RING_NO_CLAIM UINT64_MAX
+#define RTC_RING_NO_CLAIM    UINT64_MAX
 
 typedef struct {
 	uint8_t *buf;
-	uint64_t cap; /* power of two */
+	uint64_t cap;        /* power of two */
 	uint32_t max_record; /* payload bytes */
 	unsigned noutputs;
 
@@ -80,7 +80,7 @@ typedef bool (*rtc_ring_accept)(void *arg, const rtc_ring_rec *rec);
  * entries). Returns the number of records copied; *dropped receives the
  * number of records this output lost to eviction since its last read. */
 size_t rtc_ring_read(rtc_ring *r, unsigned o, uint8_t *dst, size_t dst_cap, rtc_ring_rec *recs,
-		     size_t max_recs, rtc_ring_accept accept, void *accept_arg, uint64_t *dropped);
+                     size_t max_recs, rtc_ring_accept accept, void *accept_arg, uint64_t *dropped);
 
 /* Bytes not yet read by output o (approximate, for flush decisions). */
 uint64_t rtc_ring_pending(rtc_ring *r, unsigned o);

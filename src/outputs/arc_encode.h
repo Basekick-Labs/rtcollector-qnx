@@ -59,8 +59,8 @@ void rtc_arc_enc_free(rtc_arc_enc *e);
  * length, 0 when there is nothing to send, or SIZE_MAX when the body does not
  * fit in cap (send fewer records). */
 size_t rtc_arc_encode(rtc_arc_enc *e, const rtc_config *cfg, const char *hostname, const rtc_ring_rec *recs,
-		      const uint8_t *done, size_t start, size_t n, uint8_t *verdict, rtc_output_counters *k,
-		      uint8_t *out, size_t cap);
+                      const uint8_t *done, size_t start, size_t n, uint8_t *verdict, rtc_output_counters *k,
+                      uint8_t *out, size_t cap);
 
 /* Measurement name of the group a record was encoded into, or NULL. */
 const rtc_str *rtc_arc_record_measurement(const rtc_arc_enc *e, size_t rec);

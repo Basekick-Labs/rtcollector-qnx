@@ -14,7 +14,10 @@ static void put(rtc_rec_builder *b, const void *p, size_t n)
 	b->len += n;
 }
 
-static void put_u8(rtc_rec_builder *b, uint8_t v) { put(b, &v, 1); }
+static void put_u8(rtc_rec_builder *b, uint8_t v)
+{
+	put(b, &v, 1);
+}
 
 static void put_u16(rtc_rec_builder *b, uint16_t v)
 {

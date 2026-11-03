@@ -32,7 +32,10 @@ uint64_t rtc_mono_ns(void)
 	return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
-const char *rtc_hostname(const rtc_collector *c) { return c->cfg.hostname; }
+const char *rtc_hostname(const rtc_collector *c)
+{
+	return c->cfg.hostname;
+}
 
 int rtc_output_alloc_batch(rtc_output *o, size_t batch_bytes, uint32_t max_record)
 {
@@ -201,12 +204,14 @@ static bool output_pass(rtc_collector *c, rtc_output *o, bool final, uint32_t ti
 				o->batch_begin(o);
 			uint64_t dropped = 0;
 			o->nrecs = rtc_ring_read(&c->ring, o->idx, o->batch_buf, o->batch_bytes, o->recs,
-						 o->max_recs, o->accept, o, &dropped);
+			                         o->max_recs, o->accept, o, &dropped);
 			if (dropped) {
 				rtc_counter_add(&o->counters.records_dropped, dropped);
 				if (c->cfg.warn_on_buffer)
-					RTC_WARN(o->name, "buffer full: %llu records were dropped before they could be sent",
-						 (unsigned long long)dropped);
+					RTC_WARN(o->name,
+					         "buffer full: %llu records were dropped before they could "
+					         "be sent",
+					         (unsigned long long)dropped);
 			}
 			if (o->nrecs == 0)
 				return rtc_ring_pending(&c->ring, o->idx) == 0;
@@ -272,9 +277,10 @@ static void *send_main(void *arg)
 			for (size_t j = 0; j < o->nrecs; j++)
 				unsent += !o->done[j];
 		if (unsent || left)
-			RTC_WARN(o->name, "shutdown: %zu records in the current batch and %llu bytes in the buffer "
-				 "were not sent",
-				 unsent, (unsigned long long)left);
+			RTC_WARN(o->name,
+			         "shutdown: %zu records in the current batch and %llu bytes in the buffer "
+			         "were not sent",
+			         unsent, (unsigned long long)left);
 	}
 	return NULL;
 }
@@ -306,13 +312,14 @@ void rtc_collector_stop(rtc_collector *c)
 static uint64_t losses(const rtc_collector *c)
 {
 	uint64_t n = rtc_counter_get(&c->counters.records_dropped_newest) +
-		     rtc_counter_get(&c->counters.records_oversize) +
-		     rtc_counter_get(&c->counters.records_clock_invalid) +
-		     rtc_counter_get(&c->counters.records_invalid);
+	             rtc_counter_get(&c->counters.records_oversize) +
+	             rtc_counter_get(&c->counters.records_clock_invalid) +
+	             rtc_counter_get(&c->counters.records_invalid);
 	for (unsigned i = 0; i < c->noutputs; i++) {
 		const rtc_output_counters *k = &c->outputs[i]->counters;
 		n += rtc_counter_get(&k->records_dropped) + rtc_counter_get(&k->records_rejected) +
-		     rtc_counter_get(&k->records_outcome_unknown) + rtc_counter_get(&k->points_dropped_partial);
+		     rtc_counter_get(&k->records_outcome_unknown) +
+		     rtc_counter_get(&k->points_dropped_partial);
 	}
 	return n;
 }
@@ -320,7 +327,8 @@ static uint64_t losses(const rtc_collector *c)
 int rtc_collector_run_once(rtc_collector *c)
 {
 	gather_round(c);
-	uint64_t budget = (uint64_t)llround((c->cfg.shutdown_timeout_s > 0 ? c->cfg.shutdown_timeout_s : 5) * 1e9);
+	uint64_t budget =
+	    (uint64_t)llround((c->cfg.shutdown_timeout_s > 0 ? c->cfg.shutdown_timeout_s : 5) * 1e9);
 	uint64_t deadline = rtc_mono_ns() + budget;
 	bool idle = false;
 	while (!idle) {

@@ -74,7 +74,10 @@ typedef struct {
 	int errors;
 } ctx;
 
-static yaml_node_t *node(ctx *x, int id) { return yaml_document_get_node(x->doc, id); }
+static yaml_node_t *node(ctx *x, int id)
+{
+	return yaml_document_get_node(x->doc, id);
+}
 
 static const char *scalar(yaml_node_t *n)
 {
@@ -165,7 +168,8 @@ static void load_arc(ctx *x, rtc_config *c, yaml_node_t *m)
 			double t = 0;
 			get_num(x, v, "outputs.arc.max_measurements_per_batch", &t);
 			if (t < 1 || t > 1024 || t != floor(t))
-				err(x, "outputs.arc.max_measurements_per_batch", "must be an integer from 1 to 1024");
+				err(x, "outputs.arc.max_measurements_per_batch",
+				    "must be an integer from 1 to 1024");
 			else
 				c->arc.max_measurements = (uint32_t)t;
 		} else
@@ -181,7 +185,8 @@ static void load_stdout(ctx *x, rtc_config *c, yaml_node_t *m)
 	for (yaml_node_pair_t *p = m->data.mapping.pairs.start; p < m->data.mapping.pairs.top; p++) {
 		const char *k = scalar(node(x, p->key));
 		if (k && !strcmp(k, "batch_bytes"))
-			get_size(x, node(x, p->value), "outputs.stdout.batch_bytes", &c->out_stdout.batch_bytes);
+			get_size(x, node(x, p->value), "outputs.stdout.batch_bytes",
+			         &c->out_stdout.batch_bytes);
 		else if (k)
 			RTC_WARN(C, "outputs.stdout.%s: unknown key, ignored", k);
 	}
@@ -240,8 +245,9 @@ static void load_doc(ctx *x, rtc_config *c)
 			else
 				c->max_record_bytes = (uint32_t)s;
 		} else if (!strcmp(k, "max_buffer_size"))
-			RTC_WARN(C, "max_buffer_size is ignored: rtcollector counted single-value series, "
-				    "this collector buffers multi-field rows; size the buffer with buffer_bytes");
+			RTC_WARN(
+			    C, "max_buffer_size is ignored: rtcollector counted single-value series, "
+			       "this collector buffers multi-field rows; size the buffer with buffer_bytes");
 		else if (!strcmp(k, "warn_on_buffer"))
 			get_bool(x, v, "warn_on_buffer", &c->warn_on_buffer);
 		else if (!strcmp(k, "debug"))
@@ -256,7 +262,8 @@ static void load_doc(ctx *x, rtc_config *c)
 					err(x, "tags", "must be a mapping");
 				continue;
 			}
-			for (yaml_node_pair_t *t = v->data.mapping.pairs.start; t < v->data.mapping.pairs.top; t++) {
+			for (yaml_node_pair_t *t = v->data.mapping.pairs.start; t < v->data.mapping.pairs.top;
+			     t++) {
 				const char *tk = scalar(node(x, t->key)), *tv = scalar(node(x, t->value));
 				if (!tk || !tv) {
 					err(x, "tags", "keys and values must be strings");
@@ -275,11 +282,13 @@ static void load_doc(ctx *x, rtc_config *c)
 				err(x, "inputs", "must be a list");
 				continue;
 			}
-			for (yaml_node_item_t *i = v->data.sequence.items.start; i < v->data.sequence.items.top; i++) {
+			for (yaml_node_item_t *i = v->data.sequence.items.start;
+			     i < v->data.sequence.items.top; i++) {
 				yaml_node_t *in = node(x, *i);
 				if (scalar(in))
 					add_input(x, c, scalar(in));
-				else if (in && in->type == YAML_MAPPING_NODE && in->data.mapping.pairs.start < in->data.mapping.pairs.top) {
+				else if (in && in->type == YAML_MAPPING_NODE &&
+				         in->data.mapping.pairs.start < in->data.mapping.pairs.top) {
 					const char *n = scalar(node(x, in->data.mapping.pairs.start->key));
 					if (n)
 						add_input(x, c, n);
@@ -290,14 +299,15 @@ static void load_doc(ctx *x, rtc_config *c)
 				err(x, "outputs", "must be a list");
 				continue;
 			}
-			for (yaml_node_item_t *i = v->data.sequence.items.start; i < v->data.sequence.items.top; i++) {
+			for (yaml_node_item_t *i = v->data.sequence.items.start;
+			     i < v->data.sequence.items.top; i++) {
 				yaml_node_t *out = node(x, *i);
 				const char *name = NULL;
 				yaml_node_t *settings = NULL;
 				if (scalar(out))
 					name = scalar(out);
 				else if (out && out->type == YAML_MAPPING_NODE &&
-					 out->data.mapping.pairs.start < out->data.mapping.pairs.top) {
+				         out->data.mapping.pairs.start < out->data.mapping.pairs.top) {
 					name = scalar(node(x, out->data.mapping.pairs.start->key));
 					settings = node(x, out->data.mapping.pairs.start->value);
 				}
@@ -308,7 +318,8 @@ static void load_doc(ctx *x, rtc_config *c)
 				else if (!strcmp(name, "stdout"))
 					load_stdout(x, c, settings);
 				else
-					RTC_WARN(C, "outputs: %s is not available in this build, skipped", name);
+					RTC_WARN(C, "outputs: %s is not available in this build, skipped",
+					         name);
 			}
 		} else
 			RTC_WARN(C, "%s: unknown key, ignored", k);
@@ -320,7 +331,7 @@ static int load_parser(rtc_config *c, yaml_parser_t *parser)
 	yaml_document_t doc;
 	if (!yaml_parser_load(parser, &doc)) {
 		RTC_ERROR(C, "YAML error at line %zu: %s", parser->problem_mark.line + 1,
-			  parser->problem ? parser->problem : "unknown");
+		          parser->problem ? parser->problem : "unknown");
 		return -1;
 	}
 	ctx x = {&doc, 0};
@@ -374,8 +385,10 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "flush_interval: must be more than 0 and at most 86400 seconds");
 		bad++;
 	} else if (c->flush_interval_s < c->interval_s)
-		RTC_WARN(C, "flush_interval (%g) is shorter than interval (%g): sends happen at most once per round",
-			 c->flush_interval_s, c->interval_s);
+		RTC_WARN(
+		    C,
+		    "flush_interval (%g) is shorter than interval (%g): sends happen at most once per round",
+		    c->flush_interval_s, c->interval_s);
 	if (!(c->shutdown_timeout_s >= 0) || c->shutdown_timeout_s > 600) {
 		RTC_ERROR(C, "shutdown_timeout: must be from 0 to 600 seconds");
 		bad++;
@@ -398,12 +411,14 @@ int rtc_config_validate(rtc_config *c)
 			bad++;
 		}
 		if (!rtc_valid_arc_name(c->arc.database, strlen(c->arc.database), 64)) {
-			RTC_ERROR(C, "outputs.arc.database: must start with a letter and contain only letters, "
-				     "digits, _ or - (max 64)");
+			RTC_ERROR(C,
+			          "outputs.arc.database: must start with a letter and contain only letters, "
+			          "digits, _ or - (max 64)");
 			bad++;
 		}
 		if (c->arc.batch_bytes < c->max_record_bytes || c->arc.batch_bytes > c->buffer_bytes) {
-			RTC_ERROR(C, "outputs.arc.batch_bytes: must be between max_record_bytes and buffer_bytes");
+			RTC_ERROR(
+			    C, "outputs.arc.batch_bytes: must be between max_record_bytes and buffer_bytes");
 			bad++;
 		}
 		const char *env = getenv("RTC_ARC_TOKEN");
@@ -415,8 +430,8 @@ int rtc_config_validate(rtc_config *c)
 				snprintf(c->arc.token, sizeof(c->arc.token), "%s", env);
 		}
 	}
-	if (c->out_stdout.enabled &&
-	    (c->out_stdout.batch_bytes < c->max_record_bytes || c->out_stdout.batch_bytes > c->buffer_bytes)) {
+	if (c->out_stdout.enabled && (c->out_stdout.batch_bytes < c->max_record_bytes ||
+	                              c->out_stdout.batch_bytes > c->buffer_bytes)) {
 		RTC_ERROR(C, "outputs.stdout.batch_bytes: must be between max_record_bytes and buffer_bytes");
 		bad++;
 	}

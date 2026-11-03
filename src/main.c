@@ -83,15 +83,17 @@ int main(int argc, char **argv)
 	if (cfg.once) {
 		rc = rtc_collector_run_once(&col);
 	} else {
-		RTC_INFO("main", "rtcollector %s starting: interval=%gs flush_interval=%gs buffer=%llu bytes host=%s",
-			 RTC_VERSION, cfg.interval_s, cfg.flush_interval_s, (unsigned long long)col.ring.cap,
-			 col.cfg.hostname);
+		RTC_INFO("main",
+		         "rtcollector %s starting: interval=%gs flush_interval=%gs buffer=%llu bytes host=%s",
+		         RTC_VERSION, cfg.interval_s, cfg.flush_interval_s, (unsigned long long)col.ring.cap,
+		         col.cfg.hostname);
 		if (rtc_collector_start(&col) != 0) {
 			rc = 1;
 		} else {
 			int sig = 0;
 			sigwait(&set, &sig);
-			RTC_INFO("main", "signal %d: stopping (final flush up to %gs)", sig, cfg.shutdown_timeout_s);
+			RTC_INFO("main", "signal %d: stopping (final flush up to %gs)", sig,
+			         cfg.shutdown_timeout_s);
 			rtc_collector_stop(&col);
 		}
 	}

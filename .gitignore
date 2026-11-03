@@ -1,0 +1,24 @@
+# Plans and progress notes stay local (same rule as Arc). Never `git add -f` here.
+docs/progress/
+
+# Build output
+build/
+build-*/
+*.o
+*.a
+*.so
+*.d
+
+# QNX SDP / IDE local state
+.qnx/
+qnxsdp-env.sh.local
+*.kev
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Private project instructions: canonical copy in Basekick-Labs/plannings (rtcollector-qnx/CLAUDE.md)
+CLAUDE.md
+.claude/

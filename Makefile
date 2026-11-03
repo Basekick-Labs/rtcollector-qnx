@@ -108,6 +108,7 @@ tsan:
 	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests
 	$(TSAN_RUN) build-tsan/rtc_tests ring
 	$(TSAN_RUN) build-tsan/rtc_tests lifecycle
+	$(TSAN_RUN) build-tsan/rtc_tests lpdrain
 
 FMT_FILES := $(shell find src tests include -name '*.[ch]')
 

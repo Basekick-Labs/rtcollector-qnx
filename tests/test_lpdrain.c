@@ -6,7 +6,10 @@
 #include "../src/core/collector.h"
 #include "../src/core/lpdrain.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 
 static rtc_collector C;
@@ -114,9 +117,54 @@ static void receive_time_floor(void)
 	teardown();
 }
 
+/* A writer thread in place of the resource manager while the collector's
+ * threads run and stop: every accepted write is converted or counted. */
+static _Atomic bool writer_stop;
+static uint64_t writer_ok;
+
+static void *writer(void *arg)
+{
+	(void)arg;
+	uint64_t recv = rtc_now_ns();
+	while (!atomic_load(&writer_stop)) {
+		if (write_raw("w,k=v x=1i\n", recv) == RTC_PUSH_OK)
+			writer_ok++;
+	}
+	return NULL;
+}
+
+static void threaded_drain_accounts_for_every_write(void)
+{
+	setup(1 << 14);
+	FILE *saved = stdout;
+	stdout = fopen("/dev/null", "w");
+	C.cfg.interval_s = 0.02;
+	C.cfg.flush_interval_s = 0.02;
+	atomic_store(&writer_stop, false);
+	writer_ok = 0;
+	pthread_t t;
+	CHECK(rtc_collector_start(&C) == 0);
+	pthread_create(&t, NULL, writer, NULL);
+	struct timespec ts = {0, 300000000};
+	nanosleep(&ts, NULL);
+	atomic_store(&writer_stop, true); /* the "rmgr" stops before the collector, as in production */
+	pthread_join(t, NULL);
+	rtc_collector_stop(&C);
+	fclose(stdout);
+	stdout = saved;
+	uint64_t lines = rtc_counter_get(&C.counters.lp_lines);
+	uint64_t lost = rtc_counter_get(&C.counters.rmgr_drain_dropped);
+	fprintf(stderr, "     writes=%llu converted=%llu overwritten=%llu\n", (unsigned long long)writer_ok,
+	        (unsigned long long)lines, (unsigned long long)lost);
+	CHECK(writer_ok > 1000);
+	CHECK_EQ_U(lines + lost, writer_ok);
+	teardown();
+}
+
 const t_case lpdrain_cases[] = {
     {"lpdrain", "lines_timestamps_and_counts", lines_timestamps_and_counts},
     {"lpdrain", "overflow_counted", overflow_counted},
     {"lpdrain", "receive_time_floor", receive_time_floor},
+    {"lpdrain", "threaded_drain_accounts_for_every_write", threaded_drain_accounts_for_every_write},
     {0},
 };

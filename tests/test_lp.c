@@ -93,6 +93,9 @@ static void refused(void)
 	    "m v=1 12x",                 /* timestamp not a number */
 	    "m v=1 1 2",                 /* trailing garbage */
 	    "m v=abc",                   /* not a value */
+	    "m v=-",                     /* a sign, no digits */
+	    "m v=.",                     /* a point, no digits */
+	    "m v=e5",                    /* an exponent, no digits */
 	};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
 		enum rtc_lp_result r = parse(bad[i], NULL, NULL, NULL);

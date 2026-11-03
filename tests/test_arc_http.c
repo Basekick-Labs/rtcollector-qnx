@@ -21,6 +21,9 @@ typedef struct {
 
 static rig R;
 
+static unsigned setup_max_measurements = 64;
+static bool setup_stdout;
+
 static int setup(const fake_reply *script, size_t n, size_t buffer_bytes, size_t batch_bytes)
 {
 	static bool curl_ready;
@@ -41,6 +44,9 @@ static int setup(const fake_reply *script, size_t n, size_t buffer_bytes, size_t
 	cfg.arc.batch_bytes = batch_bytes;
 	cfg.arc.timeout_ms = 2000;
 	cfg.max_record_bytes = 256;
+	cfg.arc.max_measurements = setup_max_measurements;
+	cfg.out_stdout.enabled = setup_stdout;
+	cfg.out_stdout.batch_bytes = batch_bytes;
 	if (rtc_config_validate(&cfg) != 0)
 		return -1;
 	return rtc_collector_init(&R.c, &cfg);
@@ -247,7 +253,64 @@ static void memory_constant_after_first_requests(void)
 	teardown();
 }
 
+static void clock_before_floor_drops_and_counts(void)
+{
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	R.c.clock_floor_ns = UINT64_MAX; /* as if the device booted in 1970 */
+	emit("cpu", 3);
+	CHECK_EQ_U(rtc_counter_get(&R.c.counters.records_clock_invalid), 3);
+	CHECK_EQ_U(rtc_ring_pending(&R.c.ring, 0), 0);
+	CHECK(drain(5) >= 0);
+	CHECK_EQ_U(fake_arc_requests(R.f), 0);
+	teardown();
+}
+
+static void one_measurement_per_request_when_capped(void)
+{
+	setup_max_measurements = 1;
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	emit("cpu", 2);
+	emit("mem", 2);
+	emit("disk", 2);
+	CHECK(drain(10) >= 0);
+	CHECK_EQ_U(fake_arc_requests(R.f), 3);
+	for (size_t i = 0; i < 3; i++) {
+		const char *n[4];
+		CHECK_EQ_U(items(i, n, 4), 1);
+	}
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 6);
+	teardown();
+	setup_max_measurements = 64;
+}
+
+/* Arc failing does not hold back the stdout output, and vice versa. */
+static void outputs_progress_independently(void)
+{
+	fake_reply s[] = {{503, "{}"}, {503, "{}"}, {503, "{}"}};
+	setup_stdout = true;
+	CHECK(setup(s, 3, 1 << 16, 1 << 14) == 0);
+	CHECK_EQ_U(R.c.noutputs, 2);
+	FILE *saved = stdout;
+	stdout = fopen("/dev/null", "w");
+	emit("cpu", 4);
+	rtc_sender_pass(&R.c, false, 0); /* not final: arc backs off after one 503 */
+	R.c.outputs[0]->last_flush_ns = 0;
+	R.c.outputs[1]->last_flush_ns = 0;
+	rtc_sender_pass(&R.c, false, 0);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[1]->counters.records_sent), 4);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[0]->counters.records_sent), 0);
+	CHECK(drain(10) >= 0);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[0]->counters.records_sent), 4);
+	fclose(stdout);
+	stdout = saved;
+	teardown();
+	setup_stdout = false;
+}
+
 const t_case arc_http_cases[] = {
+    {"arc_http", "clock_before_floor_drops_and_counts", clock_before_floor_drops_and_counts},
+    {"arc_http", "one_measurement_per_request_when_capped", one_measurement_per_request_when_capped},
+    {"arc_http", "outputs_progress_independently", outputs_progress_independently},
     {"arc_http", "ok_204", ok_204},
     {"arc_http", "partial_400_is_not_resent", partial_400_is_not_resent},
     {"arc_http", "refused_400_drops_the_batch", refused_400_drops_the_batch},

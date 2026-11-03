@@ -102,6 +102,12 @@ static void invalid_values_are_refused(void)
 	    "outputs:\n  - arc: {url: 'http://x', max_measurements_per_batch: 257}\n",
 	    "outputs:\n  - arc: {url: 'http://x', token: 'secret:arc/token'}\n",
 	    "max_record_bytes: 256\noutputs: [stdout]\n",
+	    "collect_priority: 0\noutputs: [stdout]\n",
+	    "send_priority: 254\noutputs: [stdout]\n",
+	    "collect_priority: 10.5\noutputs: [stdout]\n",
+	    "processes_every: 0\noutputs: [stdout]\n",
+	    "collect_priority: 1e20\noutputs: [stdout]\n",
+	    "max_processes: 0\noutputs: [stdout]\n",
 	};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
 		int rc = load(&c, bad[i]);
@@ -154,7 +160,23 @@ static void small_buffer_clamps_default_batch(void)
 	      -1);
 }
 
+static void qnx_keys(void)
+{
+	rtc_config c;
+	CHECK(load(&c, "collect_priority: 20\nsend_priority: 5\nprocesses_every: 1\nmax_processes: 10\n"
+	               "outputs:\n  - arc: {url: 'https://x', ca_file: /etc/hosts}\n") == 0);
+	CHECK(c.collect_priority == 20 && c.send_priority == 5);
+	CHECK(c.processes_every == 1 && c.max_processes == 10);
+	CHECK(!strcmp(c.arc.ca_file, "/etc/hosts"));
+	/* A CA bundle that cannot be read is refused at load, not discovered at
+	 * the first TLS handshake. */
+	CHECK(load(&c, "outputs:\n  - arc: {url: 'https://x', ca_file: /nonexistent/ca.pem}\n") == -1);
+	CHECK(load(&c, "outputs: [stdout]\n") == 0);
+	CHECK(c.collect_priority == 10 && c.send_priority == 9 && c.processes_every == 6);
+}
+
 const t_case config_cases[] = {
+    {"config", "qnx_keys", qnx_keys},
     {"config", "small_buffer_clamps_default_batch", small_buffer_clamps_default_batch},
     {"config", "loads_rtcollector_shape", loads_rtcollector_shape},
     {"config", "defaults", defaults},

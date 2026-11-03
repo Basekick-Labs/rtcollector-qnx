@@ -11,6 +11,10 @@
  *   debug: false
  *   once: false             same as --once
  *   shutdown_timeout: 5     seconds for the final flush
+ *   collect_priority: 10    QNX: collection thread priority (SCHED_RR, 1-253)
+ *   send_priority: 9        QNX: sender thread priority
+ *   processes_every: 6      rounds between process scans
+ *   max_processes: 4096     a scan stops here (overflow counted)
  *   inputs: [internal, ...] a name, or {name: {config}}
  *   outputs:
  *     - arc: {url, database, token, batch_bytes, timeout, max_measurements_per_batch (1-256)}
@@ -36,6 +40,7 @@ typedef struct {
 	char url[512];
 	char database[65];
 	char token[512];
+	char ca_file[512]; /* CA bundle for https; empty: libcurl's default */
 	size_t batch_bytes;
 	bool batch_set; /* batch_bytes given explicitly */
 	uint32_t timeout_ms;
@@ -52,6 +57,10 @@ typedef struct {
 	double interval_s;
 	double flush_interval_s;
 	double shutdown_timeout_s;
+	int collect_priority; /* QNX scheduling priority, SCHED_RR */
+	int send_priority;
+	unsigned processes_every; /* rounds between process scans */
+	uint64_t max_processes;
 	size_t buffer_bytes;
 	uint32_t max_record_bytes;
 	bool warn_on_buffer;

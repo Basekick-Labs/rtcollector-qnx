@@ -443,6 +443,8 @@ int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out)
 	e |= curl_easy_setopt(a->curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
 	e |= curl_easy_setopt(a->curl, CURLOPT_WRITEFUNCTION, on_body);
 	e |= curl_easy_setopt(a->curl, CURLOPT_WRITEDATA, a);
+	if (cfg->ca_file[0])
+		e |= curl_easy_setopt(a->curl, CURLOPT_CAINFO, cfg->ca_file);
 	a->multi = curl_multi_init();
 	if (e != CURLE_OK || !a->multi)
 		goto fail;

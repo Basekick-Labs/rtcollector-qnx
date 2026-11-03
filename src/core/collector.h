@@ -105,6 +105,13 @@ void rtc_output_free_batch(rtc_output *o);
 
 /* Built-in inputs and outputs. */
 extern const rtc_input_def rtc_input_internal;
+#ifdef RTC_QNX
+extern const rtc_input_def rtc_input_cpu;
+extern const rtc_input_def rtc_input_mem;
+extern const rtc_input_def rtc_input_processes;
+#endif
+/* The input called name in this build, or NULL. */
+const rtc_input_def *rtc_input_find(const char *name);
 int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out);
 int rtc_output_stdout_create(rtc_collector *c, unsigned idx, rtc_output **out);
 

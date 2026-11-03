@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include "log.h"
+#include "collector.h"
 #include "ring.h"
 
 #include <ctype.h>
@@ -20,6 +21,10 @@ void rtc_config_defaults(rtc_config *c)
 	c->interval_s = 10;
 	c->flush_interval_s = -1; /* = interval */
 	c->shutdown_timeout_s = 5;
+	c->collect_priority = 10;
+	c->send_priority = 9;
+	c->processes_every = 6;
+	c->max_processes = 4096;
 	c->buffer_bytes = 1u << 20;
 	c->max_record_bytes = 4096;
 	c->warn_on_buffer = true;
@@ -154,6 +159,8 @@ static void load_arc(ctx *x, rtc_config *c, yaml_node_t *m)
 			get_str(x, v, "outputs.arc.url", c->arc.url, sizeof(c->arc.url));
 		else if (!strcmp(k, "database"))
 			get_str(x, v, "outputs.arc.database", c->arc.database, sizeof(c->arc.database));
+		else if (!strcmp(k, "ca_file"))
+			get_str(x, v, "outputs.arc.ca_file", c->arc.ca_file, sizeof(c->arc.ca_file));
 		else if (!strcmp(k, "token"))
 			get_str(x, v, "outputs.arc.token", c->arc.token, sizeof(c->arc.token));
 		else if (!strcmp(k, "batch_bytes")) {
@@ -195,16 +202,10 @@ static void load_stdout(ctx *x, rtc_config *c, yaml_node_t *m)
 	}
 }
 
-static const char *known_inputs[] = {"internal"};
-
 static void add_input(ctx *x, rtc_config *c, const char *name)
 {
 	(void)x;
-	bool known = false;
-	for (size_t i = 0; i < sizeof(known_inputs) / sizeof(known_inputs[0]); i++)
-		if (!strcmp(name, known_inputs[i]))
-			known = true;
-	if (!known) {
+	if (!rtc_input_find(name)) {
 		RTC_WARN(C, "inputs: %s is not available in this build, skipped", name);
 		return;
 	}
@@ -236,7 +237,21 @@ static void load_doc(ctx *x, rtc_config *c)
 			get_num(x, v, "interval", &c->interval_s);
 		else if (!strcmp(k, "flush_interval"))
 			get_num(x, v, "flush_interval", &c->flush_interval_s);
-		else if (!strcmp(k, "shutdown_timeout"))
+		else if (!strcmp(k, "collect_priority") || !strcmp(k, "send_priority") ||
+		         !strcmp(k, "processes_every") || !strcmp(k, "max_processes")) {
+			double t = 0;
+			get_num(x, v, k, &t);
+			if (t != floor(t))
+				err(x, k, "must be an integer");
+			else if (!strcmp(k, "collect_priority"))
+				c->collect_priority = (int)t;
+			else if (!strcmp(k, "send_priority"))
+				c->send_priority = (int)t;
+			else if (!strcmp(k, "processes_every"))
+				c->processes_every = t >= 0 && t <= 1000000 ? (unsigned)t : 0;
+			else
+				c->max_processes = t >= 0 && t <= 1e9 ? (uint64_t)t : 0;
+		} else if (!strcmp(k, "shutdown_timeout"))
 			get_num(x, v, "shutdown_timeout", &c->shutdown_timeout_s);
 		else if (!strcmp(k, "buffer_bytes"))
 			get_size(x, v, "buffer_bytes", &c->buffer_bytes);
@@ -406,6 +421,19 @@ int rtc_config_validate(rtc_config *c)
 	}
 	if (!c->arc.enabled && !c->out_stdout.enabled) {
 		RTC_ERROR(C, "outputs: at least one output (arc or stdout) is required");
+		bad++;
+	}
+	if (c->collect_priority < 1 || c->collect_priority > 253 || c->send_priority < 1 ||
+	    c->send_priority > 253) {
+		RTC_ERROR(C, "collect_priority, send_priority: must be from 1 to 253");
+		bad++;
+	}
+	if (c->processes_every < 1 || c->processes_every > 1000000) {
+		RTC_ERROR(C, "processes_every: must be from 1 to 1000000");
+		bad++;
+	}
+	if (c->max_processes < 1 || c->max_processes > 1000000) {
+		RTC_ERROR(C, "max_processes: must be from 1 to 1000000");
 		bad++;
 	}
 	/* A default batch larger than a small buffer is clamped, rather than an

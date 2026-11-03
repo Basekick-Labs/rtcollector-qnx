@@ -43,6 +43,9 @@ typedef struct {
 	rtc_counter rounds_skipped;
 	rtc_counter gather_ns_last;
 	rtc_counter gather_errors;
+	rtc_counter procfs_denied;      /* 1: no PROCMGR_AID_XPROCESS_QUERY, thread counts off */
+	rtc_counter processes_overflow; /* scans stopped at max_processes */
+	rtc_counter priority_fallback;  /* a thread could not get its configured priority */
 } rtc_collect_counters;
 
 /* Written by the sender thread, one set per output. */

@@ -3,6 +3,7 @@
 #include "log.h"
 
 #include <errno.h>
+#include <sched.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,8 +16,6 @@
 #endif
 
 #define C "collector"
-
-static const rtc_input_def *all_inputs[] = {&rtc_input_internal};
 
 uint64_t rtc_now_ns(void)
 {
@@ -82,15 +81,18 @@ int rtc_collector_init(rtc_collector *c, const rtc_config *cfg)
 	if (!c->scratch)
 		return -1;
 
-	for (unsigned i = 0; i < cfg->ninputs; i++)
-		for (size_t j = 0; j < sizeof(all_inputs) / sizeof(all_inputs[0]); j++)
-			if (!strcmp(cfg->inputs[i], all_inputs[j]->name)) {
-				if (all_inputs[j]->init && all_inputs[j]->init(c) != 0) {
-					RTC_ERROR(C, "input %s failed to start", all_inputs[j]->name);
-					return -1;
-				}
-				c->inputs[c->ninputs++] = all_inputs[j];
-			}
+	/* Inputs report missing permissions through counters; init fails only
+	 * for errors that make the input meaningless. */
+	for (unsigned i = 0; i < cfg->ninputs; i++) {
+		const rtc_input_def *in = rtc_input_find(cfg->inputs[i]);
+		if (!in)
+			continue;
+		if (in->init && in->init(c) != 0) {
+			RTC_ERROR(C, "input %s failed to start", in->name);
+			return -1;
+		}
+		c->inputs[c->ninputs++] = in;
+	}
 
 	if (cfg->arc.enabled) {
 		if (rtc_output_arc_create(c, c->noutputs, &c->outputs[c->noutputs]) != 0)
@@ -305,14 +307,45 @@ static void *send_main(void *arg)
 	return NULL;
 }
 
+/* Starts a thread at a fixed SCHED_RR priority set at creation, so it never
+ * runs at the inherited one. On QNX a non-root user may not go above 63
+ * (PROCMGR_AID_PRIORITY): then it starts with the inherited priority, once
+ * logged and counted. Elsewhere the priority keys are ignored. */
+static int start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), int prio, const char *what)
+{
+#ifdef RTC_QNX
+	pthread_attr_t a;
+	struct sched_param sp = {.sched_priority = prio};
+	if (pthread_attr_init(&a) == 0) {
+		int rc = pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
+		if (rc == 0)
+			rc = pthread_attr_setschedpolicy(&a, SCHED_RR);
+		if (rc == 0)
+			rc = pthread_attr_setschedparam(&a, &sp);
+		if (rc == 0)
+			rc = pthread_create(t, &a, fn, c);
+		pthread_attr_destroy(&a);
+		if (rc == 0)
+			return 0;
+		RTC_WARN(C, "cannot run the %s thread at priority %d (%s); using the inherited priority",
+		         what, prio, strerror(rc));
+		rtc_counter_add(&c->counters.priority_fallback, 1);
+	}
+#else
+	(void)prio;
+	(void)what;
+#endif
+	return pthread_create(t, NULL, fn, c);
+}
+
 int rtc_collector_start(rtc_collector *c)
 {
-	int rc = pthread_create(&c->send_thread, NULL, send_main, c);
+	int rc = start_thread(c, &c->send_thread, send_main, c->cfg.send_priority, "sender");
 	if (rc != 0) {
 		RTC_ERROR(C, "cannot start the sender thread: %s", strerror(rc));
 		return -1;
 	}
-	rc = pthread_create(&c->collect_thread, NULL, collect_main, c);
+	rc = start_thread(c, &c->collect_thread, collect_main, c->cfg.collect_priority, "collection");
 	if (rc != 0) {
 		RTC_ERROR(C, "cannot start the collection thread: %s", strerror(rc));
 		atomic_store(&c->abort_after_ns, rtc_mono_ns());

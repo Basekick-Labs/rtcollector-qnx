@@ -31,11 +31,15 @@ ifeq ($(UNAME),Darwin)
   DEPS_LIBS   := -L$(BREW)/lib
 endif
 
+# Header dependency files. qcc ignores -MMD; pass it to the preprocessor.
+DEPFLAGS = -MMD -MP
 ifeq ($(PLATFORM),qnx)
+  DEPFLAGS = -Wp,-MMD,$(@:.o=.d),-MT,$@,-MP
   # SDP 8.0 ships libcurl (shared, on the image) and libzstd (static here: the
   # mkqnximage image has no libzstd.so). libyaml is vendored. pthreads are in
   # libc on QNX: no -lpthread.
-  DEPS_CFLAGS := -I$(QNX_TARGET)/usr/include/zstd -Ithird_party/libyaml/include -DYAML_DECLARE_STATIC -DRTC_QNX=1
+  DEPS_CFLAGS := -I$(QNX_TARGET)/usr/include/zstd -Ithird_party/libyaml/include -DYAML_DECLARE_STATIC -DRTC_QNX=1 \
+                 -D_QNX_SOURCE
   YAML_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(wildcard third_party/libyaml/src/*.c))
   PLATFORM_SRC := $(wildcard src/qnx/*.c)
   QNX_LIBS := -lcurl -Wl,-Bstatic -lzstd -Wl,-Bdynamic -lm
@@ -68,11 +72,12 @@ ifeq ($(SANITIZE),thread)
 endif
 
 CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config.c \
+            src/core/cpumath.c src/core/inputs.c \
             src/core/log.c src/core/collector.c src/inputs/internal.c \
             src/outputs/arc_encode.c src/outputs/arc.c src/outputs/stdout.c
 TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpack.c \
             tests/test_config.c tests/test_arc_encode.c tests/test_arc_http.c tests/fake_arc.c \
-            tests/mp_read.c
+            tests/mp_read.c tests/test_cpumath.c
 
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o) $(PLATFORM_SRC:%.c=$(BUILD)/%.o) $(YAML_OBJ)
 TEST_OBJ := $(TEST_SRC:%.c=$(BUILD)/%.o)
@@ -87,7 +92,7 @@ $(BUILD)/third_party/%.o: third_party/%.c
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD)/rtcollector: $(CORE_OBJ) $(BUILD)/src/main.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@

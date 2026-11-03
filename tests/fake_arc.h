@@ -17,7 +17,8 @@ typedef struct {
 typedef struct fake_arc fake_arc;
 
 /* Starts on 127.0.0.1 with an ephemeral port. Replies are consumed in order;
- * after the script runs out every request gets 204. */
+ * after the script runs out every request gets 204. Status 0 means never
+ * answer (the connection hangs until the server stops). */
 fake_arc *fake_arc_start(const fake_reply *script, size_t n);
 int fake_arc_port(const fake_arc *f);
 void fake_arc_stop(fake_arc *f);

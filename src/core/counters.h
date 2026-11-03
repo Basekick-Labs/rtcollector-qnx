@@ -55,9 +55,9 @@ typedef struct {
 	rtc_counter requests;
 	rtc_counter request_errors;
 	rtc_counter retries;
-	rtc_counter values_clamped;
 	rtc_counter fields_nonfinite;
 	rtc_counter type_conflicts;
+	rtc_counter columns_over_limit;
 	rtc_counter invalid_names;
 	rtc_counter last_status;
 } rtc_output_counters;

@@ -56,20 +56,23 @@ outputs:
 |---|---|---|
 | `interval` | `10` | Seconds between collection rounds |
 | `flush_interval` | `interval` | Seconds between sends; a send also happens when a batch is full |
-| `buffer_bytes` | `1MiB` | Size of the buffer between collection and sending. When it is full the oldest records are dropped and counted |
-| `max_record_bytes` | `4096` | Largest record an input may produce |
+| `buffer_bytes` | `1MiB` | Size of the buffer between collection and sending, allocated once. When it is full the oldest records are dropped; if an output is copying those at that moment, the newest record is dropped instead. Every drop is counted |
+| `max_record_bytes` | `4096` | Largest record an input may produce (at least 512) |
 | `hostname` | system hostname | Value of the `host` tag on every row |
 | `tags` | none | Tags added to every row; they take precedence over tags an input sets |
 | `warn_on_buffer` | `true` | Log when records are dropped because the buffer was full |
-| `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown |
+| `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; a request still running then is cut off, and whatever was not sent is counted as dropped |
+| `debug` | `false` | Verbose logging (same as `-d`) |
+| `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |
 | `outputs.arc.url` | required | Arc base URL |
 | `outputs.arc.database` | `default` | Arc database (`x-arc-database`) |
-| `outputs.arc.token` | none | Arc API token; `RTC_ARC_TOKEN` overrides it |
-| `outputs.arc.batch_bytes` | `256KiB` | Records per request, at most |
+| `outputs.arc.token` | none | Arc API token; `RTC_ARC_TOKEN` overrides it. rtcollector's `secret:` references are not supported |
+| `outputs.arc.batch_bytes` | `256KiB` | Bytes of records per request, at most (default capped at half of `buffer_bytes`) |
 | `outputs.arc.timeout` | `10` | Request timeout, seconds |
-| `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request |
+| `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request (1 to 256) |
 | `outputs.stdout` | off | Print rows as line protocol, for debugging |
+| `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records per write |
 
 `max_buffer_size` from rtcollector configurations is accepted and ignored:
 rtcollector counted single-value series, this collector buffers multi-field

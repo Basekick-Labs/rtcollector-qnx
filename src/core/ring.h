@@ -82,6 +82,10 @@ typedef bool (*rtc_ring_accept)(void *arg, const rtc_ring_rec *rec);
 size_t rtc_ring_read(rtc_ring *r, unsigned o, uint8_t *dst, size_t dst_cap, rtc_ring_rec *recs,
                      size_t max_recs, rtc_ring_accept accept, void *accept_arg, uint64_t *dropped);
 
+/* Records output o never read: still in the ring, or evicted after its last
+ * read. Only meaningful once the producer has stopped (shutdown, --once). */
+uint64_t rtc_ring_unseen(const rtc_ring *r, unsigned o);
+
 /* Bytes not yet read by output o (approximate, for flush decisions). */
 uint64_t rtc_ring_pending(rtc_ring *r, unsigned o);
 

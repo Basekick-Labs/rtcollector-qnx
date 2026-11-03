@@ -95,6 +95,11 @@ static void handle_conn(fake_arc *f, int fd)
 		}
 		pthread_mutex_unlock(&f->mu);
 
+		if (rep.status == 0) { /* hang: never answer */
+			while (read_some(fd, buf, sizeof(buf), &f->stop) > 0)
+				;
+			return;
+		}
 		char out[4096];
 		int n = snprintf(
 		    out, sizeof(out),

@@ -63,14 +63,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Signals go to sigwait in this thread; block them before any thread
-	 * starts so the workers inherit the mask. */
+	signal(SIGPIPE, SIG_IGN);
 	sigset_t set;
 	sigemptyset(&set);
 	sigaddset(&set, SIGINT);
 	sigaddset(&set, SIGTERM);
-	pthread_sigmask(SIG_BLOCK, &set, NULL);
-	signal(SIGPIPE, SIG_IGN);
 
 	static rtc_collector col;
 	if (rtc_collector_init(&col, &cfg) != 0) {
@@ -83,6 +80,10 @@ int main(int argc, char **argv)
 	if (cfg.once) {
 		rc = rtc_collector_run_once(&col);
 	} else {
+		/* Signals go to sigwait in this thread; block them before any
+		 * thread starts so the workers inherit the mask. --once keeps the
+		 * default handlers, so Ctrl-C still interrupts it. */
+		pthread_sigmask(SIG_BLOCK, &set, NULL);
 		RTC_INFO("main",
 		         "rtcollector %s starting: interval=%gs flush_interval=%gs buffer=%llu bytes host=%s",
 		         RTC_VERSION, cfg.interval_s, cfg.flush_interval_s, (unsigned long long)col.ring.cap,

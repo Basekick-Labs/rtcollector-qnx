@@ -156,21 +156,22 @@ static void load_arc(ctx *x, rtc_config *c, yaml_node_t *m)
 			get_str(x, v, "outputs.arc.database", c->arc.database, sizeof(c->arc.database));
 		else if (!strcmp(k, "token"))
 			get_str(x, v, "outputs.arc.token", c->arc.token, sizeof(c->arc.token));
-		else if (!strcmp(k, "batch_bytes"))
+		else if (!strcmp(k, "batch_bytes")) {
 			get_size(x, v, "outputs.arc.batch_bytes", &c->arc.batch_bytes);
-		else if (!strcmp(k, "timeout")) {
+			c->arc.batch_set = true;
+		} else if (!strcmp(k, "timeout")) {
 			double t = 0;
 			get_num(x, v, "outputs.arc.timeout", &t);
-			if (t <= 0 || t > 600)
-				err(x, "outputs.arc.timeout", "must be between 0 and 600 seconds");
+			if (t < 0.001 || t > 600)
+				err(x, "outputs.arc.timeout", "must be from 0.001 to 600 seconds");
 			else
 				c->arc.timeout_ms = (uint32_t)(t * 1000);
 		} else if (!strcmp(k, "max_measurements_per_batch")) {
 			double t = 0;
 			get_num(x, v, "outputs.arc.max_measurements_per_batch", &t);
-			if (t < 1 || t > 1024 || t != floor(t))
+			if (t < 1 || t > 256 || t != floor(t))
 				err(x, "outputs.arc.max_measurements_per_batch",
-				    "must be an integer from 1 to 1024");
+				    "must be an integer from 1 to 256");
 			else
 				c->arc.max_measurements = (uint32_t)t;
 		} else
@@ -185,10 +186,11 @@ static void load_stdout(ctx *x, rtc_config *c, yaml_node_t *m)
 		return;
 	for (yaml_node_pair_t *p = m->data.mapping.pairs.start; p < m->data.mapping.pairs.top; p++) {
 		const char *k = scalar(node(x, p->key));
-		if (k && !strcmp(k, "batch_bytes"))
+		if (k && !strcmp(k, "batch_bytes")) {
 			get_size(x, node(x, p->value), "outputs.stdout.batch_bytes",
 			         &c->out_stdout.batch_bytes);
-		else if (k)
+			c->out_stdout.batch_set = true;
+		} else if (k)
 			RTC_WARN(C, "outputs.stdout.%s: unknown key, ignored", k);
 	}
 }
@@ -376,14 +378,14 @@ int rtc_config_load(rtc_config *c, const char *path)
 int rtc_config_validate(rtc_config *c)
 {
 	int bad = 0;
-	if (!(c->interval_s > 0) || c->interval_s > 86400) {
-		RTC_ERROR(C, "interval: must be more than 0 and at most 86400 seconds");
+	if (!(c->interval_s >= 0.001) || c->interval_s > 86400) {
+		RTC_ERROR(C, "interval: must be from 0.001 to 86400 seconds");
 		bad++;
 	}
 	if (c->flush_interval_s < 0)
 		c->flush_interval_s = c->interval_s;
-	else if (c->flush_interval_s == 0 || c->flush_interval_s > 86400) {
-		RTC_ERROR(C, "flush_interval: must be more than 0 and at most 86400 seconds");
+	else if (c->flush_interval_s < 0.001 || c->flush_interval_s > 86400) {
+		RTC_ERROR(C, "flush_interval: must be from 0.001 to 86400 seconds");
 		bad++;
 	} else if (c->flush_interval_s < c->interval_s)
 		RTC_WARN(
@@ -394,8 +396,8 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "shutdown_timeout: must be from 0 to 600 seconds");
 		bad++;
 	}
-	if (c->max_record_bytes < 64) {
-		RTC_ERROR(C, "max_record_bytes: must be at least 64");
+	if (c->max_record_bytes < 512) {
+		RTC_ERROR(C, "max_record_bytes: must be at least 512 (the internal input's records need it)");
 		bad++;
 	}
 	if (c->buffer_bytes < (size_t)RTC_RING_HDR + c->max_record_bytes) {
@@ -404,6 +406,17 @@ int rtc_config_validate(rtc_config *c)
 	}
 	if (!c->arc.enabled && !c->out_stdout.enabled) {
 		RTC_ERROR(C, "outputs: at least one output (arc or stdout) is required");
+		bad++;
+	}
+	/* A default batch larger than a small buffer is clamped, rather than an
+	 * error about a key the operator never set. */
+	size_t half = c->buffer_bytes / 2 > c->max_record_bytes ? c->buffer_bytes / 2 : c->buffer_bytes;
+	if (!c->arc.batch_set && c->arc.batch_bytes > half)
+		c->arc.batch_bytes = half;
+	if (!c->out_stdout.batch_set && c->out_stdout.batch_bytes > half)
+		c->out_stdout.batch_bytes = half;
+	if (c->arc.enabled && !strncmp(c->arc.token, "secret:", 7) && !getenv("RTC_ARC_TOKEN")) {
+		RTC_ERROR(C, "outputs.arc.token: secret: references are not supported; set RTC_ARC_TOKEN");
 		bad++;
 	}
 	if (c->arc.enabled) {
@@ -439,6 +452,10 @@ int rtc_config_validate(rtc_config *c)
 	for (unsigned i = 0; i < c->ntags; i++) {
 		const char *k = c->tags[i].key;
 		bool time_alike = strlen(k) == 4 && strncasecmp(k, "time", 4) == 0;
+		if (strcasecmp(k, "host") == 0 && strcmp(k, "host") != 0) {
+			RTC_ERROR(C, "tags: \"%s\" differs from the host tag only in letter case", k);
+			bad++;
+		}
 		if (!k[0] || time_alike) {
 			RTC_ERROR(C, "tags: \"%s\" cannot be a tag name (time is the timestamp)", k);
 			bad++;

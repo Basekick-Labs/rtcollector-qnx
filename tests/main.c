@@ -14,9 +14,10 @@ SUITE(ring)
 SUITE(config)
 SUITE(arc_encode)
 SUITE(arc_http)
+SUITE(lifecycle)
 
-static const t_case *suites[] = {record_cases, msgpack_cases,    ring_cases,
-                                 config_cases, arc_encode_cases, arc_http_cases};
+static const t_case *suites[] = {record_cases,     msgpack_cases,  ring_cases,     config_cases,
+                                 arc_encode_cases, arc_http_cases, lifecycle_cases};
 
 int main(int argc, char **argv)
 {

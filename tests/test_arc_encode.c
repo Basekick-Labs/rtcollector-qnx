@@ -13,6 +13,7 @@ typedef struct {
 	rtc_ring_rec recs[MAXR];
 	uint8_t done[MAXR];
 	uint8_t verdict[MAXR];
+	uint8_t flags[MAXR];
 	size_t n;
 } batch;
 
@@ -36,8 +37,8 @@ static mp_node *encode(batch *b, const rtc_config *cfg, rtc_output_counters *k, 
 	static uint8_t out[1 << 16];
 	rtc_arc_enc e;
 	CHECK(rtc_arc_enc_init(&e, MAXR, 8) == 0);
-	size_t len =
-	    rtc_arc_encode(&e, cfg, "pi5", b->recs, b->done, 0, b->n, b->verdict, k, out, sizeof(out));
+	size_t len = rtc_arc_encode(&e, cfg, "pi5", b->recs, b->done, b->flags, 0, b->n, b->verdict, k, out,
+	                            sizeof(out));
 	rtc_arc_enc_free(&e);
 	if (len_out)
 		*len_out = len;
@@ -196,7 +197,8 @@ static void nothing_to_send_and_overflow(void)
 	uint8_t tiny[8];
 	rtc_arc_enc e;
 	rtc_arc_enc_init(&e, MAXR, 8);
-	len = rtc_arc_encode(&e, &cfg, "pi5", b.recs, b.done, 0, b.n, b.verdict, &k, tiny, sizeof(tiny));
+	len = rtc_arc_encode(&e, &cfg, "pi5", b.recs, b.done, b.flags, 0, b.n, b.verdict, &k, tiny,
+	                     sizeof(tiny));
 	CHECK(len == SIZE_MAX);
 	rtc_arc_enc_free(&e);
 }

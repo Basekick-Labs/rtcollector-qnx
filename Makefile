@@ -75,6 +75,7 @@ test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
 tsan:
 	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests
 	$(TSAN_RUN) build-tsan/rtc_tests ring
+	$(TSAN_RUN) build-tsan/rtc_tests lifecycle
 
 FMT_FILES := $(shell find src tests -name '*.[ch]')
 

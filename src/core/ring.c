@@ -101,11 +101,16 @@ enum rtc_push_result rtc_ring_push(rtc_ring *r, const uint8_t *payload, uint32_t
 	uint64_t tail = atomic_load_explicit(&r->tail, memory_order_relaxed);
 
 	if (head + total - tail > r->cap) {
-		/* Evict whole records from the oldest end. Our own bytes: the
-		 * headers we read here are ones this thread wrote. Bounded: at most
-		 * cap / RTC_RING_HDR records. */
+		/* Evict whole records from the oldest end, but never a record at or
+		 * after a claim: an output is copying it. If the space cannot be
+		 * made without that, evict nothing and drop the new record. The
+		 * headers read here are bytes this thread wrote. The loop frees at
+		 * most total / (RTC_RING_HDR + 1) + 1 records. */
+		uint64_t limit = min_claim(r);
 		uint64_t t = tail;
 		while (head + total - t > r->cap) {
+			if (t >= limit)
+				return RTC_PUSH_DROPPED;
 			uint8_t h[RTC_RING_HDR];
 			uint32_t l;
 			uint64_t s, ts;
@@ -117,7 +122,10 @@ enum rtc_push_result rtc_ring_push(rtc_ring *r, const uint8_t *payload, uint32_t
 	}
 
 	/* The bytes this write overwrites are those at logical positions below
-	 * head + total - cap. None of them may be at or after a claim. */
+	 * head + total - cap. None of them may be at or after a claim. This
+	 * load comes after the tail store (store-then-load, seq_cst), which is
+	 * what makes the reader's claim-then-check-tail safe: either the reader
+	 * saw the new tail and moved past it, or this load sees its claim. */
 	uint64_t claim = min_claim(r);
 	if (claim != RTC_RING_NO_CLAIM && head + total > claim + r->cap)
 		return RTC_PUSH_DROPPED;
@@ -188,4 +196,9 @@ uint64_t rtc_ring_pending(rtc_ring *r, unsigned o)
 	uint64_t tail = atomic_load_explicit(&r->tail, memory_order_acquire);
 	uint64_t cur = r->cursor[o] < tail ? tail : r->cursor[o];
 	return head > cur ? head - cur : 0;
+}
+
+uint64_t rtc_ring_unseen(const rtc_ring *r, unsigned o)
+{
+	return r->next_seq > r->expect_seq[o] ? r->next_seq - r->expect_seq[o] : 0;
 }

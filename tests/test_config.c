@@ -94,6 +94,14 @@ static void invalid_values_are_refused(void)
 	    "tags: [a, b]\noutputs: [stdout]\n",
 	    "- just\n- a list\n",
 	    "interval: [\n",
+	    "tags: {Time: x}\noutputs: [stdout]\n",
+	    "tags: {site: a, Site: b}\noutputs: [stdout]\n",
+	    "tags: {Host: x}\noutputs: [stdout]\n",
+	    "interval: 1e-10\noutputs: [stdout]\n",
+	    "outputs:\n  - arc: {url: 'http://x', timeout: 0.0001}\n",
+	    "outputs:\n  - arc: {url: 'http://x', max_measurements_per_batch: 257}\n",
+	    "outputs:\n  - arc: {url: 'http://x', token: 'secret:arc/token'}\n",
+	    "max_record_bytes: 256\noutputs: [stdout]\n",
 	};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
 		int rc = load(&c, bad[i]);
@@ -135,7 +143,19 @@ static void token_from_env(void)
 	unsetenv("RTC_ARC_TOKEN");
 }
 
+/* Only buffer_bytes set: the default batch is clamped, not an error about a
+ * key the operator never wrote. */
+static void small_buffer_clamps_default_batch(void)
+{
+	rtc_config c;
+	CHECK(load(&c, "buffer_bytes: 128KiB\noutputs:\n  - arc: {url: 'http://x'}\n") == 0);
+	CHECK(c.arc.batch_bytes <= c.buffer_bytes);
+	CHECK(load(&c, "buffer_bytes: 128KiB\noutputs:\n  - arc: {url: 'http://x', batch_bytes: 1MiB}\n") ==
+	      -1);
+}
+
 const t_case config_cases[] = {
+    {"config", "small_buffer_clamps_default_batch", small_buffer_clamps_default_batch},
     {"config", "loads_rtcollector_shape", loads_rtcollector_shape},
     {"config", "defaults", defaults},
     {"config", "non_default_values", non_default_values},

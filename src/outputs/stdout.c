@@ -18,11 +18,11 @@ static void esc(FILE *f, const char *s, size_t n, const char *special)
 	}
 }
 
-static void print_rec(rtc_collector *c, const rtc_ring_rec *r, FILE *f)
+static bool print_rec(rtc_collector *c, const rtc_ring_rec *r, FILE *f)
 {
 	rtc_rec_view v;
 	if (!rtc_rec_decode(r->payload, r->len, &v))
-		return;
+		return false;
 	esc(f, v.measurement.p, v.measurement.len, ", ");
 	const char *host = c->cfg.hostname;
 	size_t hl = strlen(host);
@@ -81,17 +81,20 @@ static void print_rec(rtc_collector *c, const rtc_ring_rec *r, FILE *f)
 		}
 	}
 	fprintf(f, " %" PRIu64 "\n", r->ts_ns);
+	return true;
 }
 
-static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
+static enum rtc_send_outcome send_batch(rtc_output *o, uint64_t deadline_ns)
 {
-	(void)timeout_cap_ms;
+	(void)deadline_ns;
 	for (size_t i = 0; i < o->nrecs; i++) {
 		if (o->done[i])
 			continue;
-		print_rec(o->collector, &o->recs[i], stdout);
 		o->done[i] = 1;
-		rtc_counter_add(&o->counters.records_sent, 1);
+		if (print_rec(o->collector, &o->recs[i], stdout))
+			rtc_counter_add(&o->counters.records_sent, 1);
+		else
+			rtc_counter_add(&o->counters.records_rejected, 1);
 	}
 	fflush(stdout);
 	rtc_counter_add(&o->counters.requests, 1);

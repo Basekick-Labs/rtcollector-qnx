@@ -122,7 +122,7 @@ typedef struct {
 
 /* Decide whether a row fits its group; on success commit its new columns. */
 static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsigned nin,
-                  rtc_output_counters *k)
+                  rtc_output_counters *k, bool count_nonfinite)
 {
 	pend p[RTC_REC_MAX_TAGS + RTC_REC_MAX_FIELDS];
 	unsigned np = 0, nfields = 0;
@@ -150,7 +150,8 @@ static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsign
 			return false;
 		}
 		if (f->type == RTC_F_F64 && !isfinite(f->v.f)) {
-			rtc_counter_add(&k->fields_nonfinite, 1);
+			if (count_nonfinite) /* once per record, not per retry */
+				rtc_counter_add(&k->fields_nonfinite, 1);
 			continue;
 		}
 		p[np++] = (pend){f->key, 0, f->type};
@@ -191,7 +192,7 @@ static bool admit(rtc_arc_group *g, const rtc_rec_view *v, const inj *in, unsign
 		}
 	}
 	if (g->ncols + add > RTC_ARC_MAX_COLS - nin) {
-		rtc_counter_add(&k->type_conflicts, 1);
+		rtc_counter_add(&k->columns_over_limit, 1);
 		return false;
 	}
 	for (unsigned i = 0; i < np; i++)
@@ -220,8 +221,8 @@ static const rtc_field *field_value(const rtc_rec_view *v, rtc_str k)
 }
 
 size_t rtc_arc_encode(rtc_arc_enc *e, const rtc_config *cfg, const char *hostname, const rtc_ring_rec *recs,
-                      const uint8_t *done, size_t start, size_t n, uint8_t *verdict, rtc_output_counters *k,
-                      uint8_t *out, size_t cap)
+                      const uint8_t *done, uint8_t *flags, size_t start, size_t n, uint8_t *verdict,
+                      rtc_output_counters *k, uint8_t *out, size_t cap)
 {
 	inj in[RTC_CFG_MAX_TAGS + 1];
 	unsigned nin = injected(cfg, in);
@@ -262,7 +263,9 @@ size_t rtc_arc_encode(rtc_arc_enc *e, const rtc_config *cfg, const char *hostnam
 			ng->ncols = 0;
 			ng->nrows = 0;
 		}
-		if (!admit(&e->groups[g], &v, in, nin, k)) {
+		bool first_time = !(flags[i] & RTC_ARC_FLAG_SEEN);
+		flags[i] |= RTC_ARC_FLAG_SEEN;
+		if (!admit(&e->groups[g], &v, in, nin, k, first_time)) {
 			verdict[i] = RTC_V_REJECTED;
 			continue;
 		}

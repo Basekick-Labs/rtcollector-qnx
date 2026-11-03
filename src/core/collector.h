@@ -40,18 +40,21 @@ struct rtc_output {
 	uint8_t *batch_buf;
 	rtc_ring_rec *recs;
 	uint8_t *done;
+	uint8_t *flags; /* per record, owned by the output (e.g. counted once) */
 	size_t max_recs;
 	size_t nrecs;
 	size_t limit; /* records per request; halved on 413 or encode overflow */
 	bool has_batch;
 
 	uint64_t last_flush_ns;
+	bool draining; /* a flush is in progress: keep sending until the ring is empty */
 	uint64_t next_attempt_ns;
 	uint64_t backoff_ns;
 
 	rtc_ring_accept accept; /* optional: limit what goes in one batch */
 	void (*batch_begin)(rtc_output *o);
-	enum rtc_send_outcome (*send)(rtc_output *o, uint32_t timeout_ms);
+	/* deadline_ns: CLOCK_MONOTONIC time by which a request must end, 0 for none. */
+	enum rtc_send_outcome (*send)(rtc_output *o, uint64_t deadline_ns);
 	void (*destroy)(rtc_output *o);
 	void *impl;
 	rtc_collector *collector;
@@ -69,8 +72,10 @@ struct rtc_collector {
 	unsigned noutputs;
 
 	uint64_t clock_floor_ns;
-	_Atomic bool clock_valid;
 	_Atomic bool stop;
+	/* Set at shutdown and in --once: in-flight requests are aborted once
+	 * CLOCK_MONOTONIC passes it. 0 = no limit. */
+	_Atomic uint64_t abort_after_ns;
 	pthread_t collect_thread, send_thread;
 };
 
@@ -104,7 +109,12 @@ int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out);
 int rtc_output_stdout_create(rtc_collector *c, unsigned idx, rtc_output **out);
 
 /* Sender: one pass over the outputs. final: flush regardless of intervals.
- * Returns true when no output holds an unsent batch or pending ring data. */
-bool rtc_sender_pass(rtc_collector *c, bool final, uint32_t timeout_cap_ms);
+ * deadline_ns bounds every request (0 = none). Returns true when no output
+ * holds an unsent batch or pending ring data. */
+bool rtc_sender_pass(rtc_collector *c, bool final, uint64_t deadline_ns);
+
+/* Counts every record an output has not delivered as dropped. Call only after
+ * the collection thread has stopped. */
+void rtc_collector_account_unsent(rtc_collector *c, bool log);
 
 #endif

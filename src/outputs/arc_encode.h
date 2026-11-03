@@ -30,6 +30,9 @@
 
 enum { RTC_V_SKIP = 0, RTC_V_SENT = 1, RTC_V_REJECTED = 2 };
 
+/* flags[] bits, per record in the batch, kept across retries. */
+#define RTC_ARC_FLAG_SEEN 0x01
+
 typedef struct {
 	rtc_str name;
 	uint8_t is_tag;
@@ -54,13 +57,15 @@ typedef struct {
 int rtc_arc_enc_init(rtc_arc_enc *e, size_t max_recs, uint32_t max_groups);
 void rtc_arc_enc_free(rtc_arc_enc *e);
 
-/* Encodes records [start, start+n) that are not done. Writes a verdict per
+/* Encodes records [start, start+n) that are not done. flags[] (per record,
+ * zeroed when the batch is read) makes validation counters count a record
+ * once even when it is encoded again for a retry or a split. Writes a verdict per
  * record (RTC_V_*), counts validation drops in k, and returns the body
  * length, 0 when there is nothing to send, or SIZE_MAX when the body does not
  * fit in cap (send fewer records). */
 size_t rtc_arc_encode(rtc_arc_enc *e, const rtc_config *cfg, const char *hostname, const rtc_ring_rec *recs,
-                      const uint8_t *done, size_t start, size_t n, uint8_t *verdict, rtc_output_counters *k,
-                      uint8_t *out, size_t cap);
+                      const uint8_t *done, uint8_t *flags, size_t start, size_t n, uint8_t *verdict,
+                      rtc_output_counters *k, uint8_t *out, size_t cap);
 
 /* Measurement name of the group a record was encoded into, or NULL. */
 const rtc_str *rtc_arc_record_measurement(const rtc_arc_enc *e, size_t rec);

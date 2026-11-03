@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <time.h>
 
 #ifndef RTC_ASAN /* set by `make SANITIZE=1` */
 #define RTC_ASAN 0
@@ -43,7 +44,7 @@ static int setup(const fake_reply *script, size_t n, size_t buffer_bytes, size_t
 	cfg.buffer_bytes = buffer_bytes;
 	cfg.arc.batch_bytes = batch_bytes;
 	cfg.arc.timeout_ms = 2000;
-	cfg.max_record_bytes = 256;
+	cfg.max_record_bytes = 512;
 	cfg.arc.max_measurements = setup_max_measurements;
 	cfg.out_stdout.enabled = setup_stdout;
 	cfg.out_stdout.batch_bytes = batch_bytes;
@@ -70,11 +71,16 @@ static void emit(const char *m, int n)
 	}
 }
 
+/* Final-mode passes until idle; retries are spaced (up to 250 ms) by the
+ * sender's own backoff, so sleep between passes. */
 static int drain(int max_passes)
 {
-	for (int i = 0; i < max_passes; i++)
+	for (int i = 0; i < max_passes * 20; i++) {
 		if (rtc_sender_pass(&R.c, true, 0))
 			return i;
+		struct timespec ts = {0, 20000000};
+		nanosleep(&ts, NULL);
+	}
 	return -1;
 }
 
@@ -146,8 +152,11 @@ static void refused_400_drops_the_batch(void)
 static void stopped_500_resends_only_unwritten(void)
 {
 	fake_reply s[] = {
-	    {500, "{\"error\":\"write stopped\",\"rows_written\":2,\"written_measurements\":[\"cpu\"],"
-	          "\"stopped_at_measurement\":\"mem\"}"}};
+	    /* Arc's real shape: keys sorted, the error text (which also names the
+	     * written measurements) first. */
+	    {500, "{\"error\":\"write stopped at measurement mem after writing [cpu]. Resending the "
+	          "whole request writes the written rows again\",\"rows_written\":2,"
+	          "\"stopped_at_measurement\":\"mem\",\"written_measurements\":[\"cpu\"]}"}};
 	CHECK(setup(s, 1, 1 << 16, 1 << 14) == 0);
 	emit("cpu", 2);
 	emit("mem", 2);
@@ -307,7 +316,40 @@ static void outputs_progress_independently(void)
 	setup_stdout = false;
 }
 
+/* "partial write" without "the other points were written": nothing stored. */
+static void partial_400_all_dropped_is_not_sent(void)
+{
+	fake_reply s[] = {{400, "{\"error\":\"partial write: 3 points dropped: 3 in \\\"cpu\\\": bad;\"}"}};
+	CHECK(setup(s, 1, 1 << 16, 1 << 14) == 0);
+	emit("cpu", 3);
+	CHECK(drain(10) >= 0);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 0);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_rejected), 3);
+	CHECK_EQ_U(rtc_counter_get(&K()->points_dropped_partial), 3);
+	teardown();
+}
+
+/* A flush that stops early (measurement cap) keeps going in the same pass,
+ * instead of leaving the rest for the next flush_interval. */
+static void flush_drains_backlog_in_one_pass(void)
+{
+	setup_max_measurements = 1;
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.flush_interval_s = 3600; /* only "due" because we force it below */
+	emit("cpu", 1);
+	emit("mem", 1);
+	emit("disk", 1);
+	R.c.outputs[0]->last_flush_ns = 0; /* the flush is due now */
+	rtc_sender_pass(&R.c, false, 0);
+	CHECK_EQ_U(fake_arc_requests(R.f), 3);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 3);
+	teardown();
+	setup_max_measurements = 64;
+}
+
 const t_case arc_http_cases[] = {
+    {"arc_http", "partial_400_all_dropped_is_not_sent", partial_400_all_dropped_is_not_sent},
+    {"arc_http", "flush_drains_backlog_in_one_pass", flush_drains_backlog_in_one_pass},
     {"arc_http", "clock_before_floor_drops_and_counts", clock_before_floor_drops_and_counts},
     {"arc_http", "one_measurement_per_request_when_capped", one_measurement_per_request_when_capped},
     {"arc_http", "outputs_progress_independently", outputs_progress_independently},
@@ -320,5 +362,86 @@ const t_case arc_http_cases[] = {
     {"arc_http", "unavailable_503_then_ok_loses_nothing", unavailable_503_then_ok_loses_nothing},
     {"arc_http", "outage_accounts_for_every_record", outage_accounts_for_every_record},
     {"arc_http", "memory_constant_after_first_requests", memory_constant_after_first_requests},
+    {0},
+};
+
+/* --- lifecycle: threads, shutdown, --once ------------------------------------ */
+
+static double since(uint64_t t0)
+{
+	return (double)(rtc_mono_ns() - t0) / 1e9;
+}
+
+/* SIGTERM while a request hangs: stop returns within shutdown_timeout plus a
+ * margin, not after the request timeout (review H1). */
+static void shutdown_budget_bounds_a_hanging_request(void)
+{
+	fake_reply s[] = {{0, ""}};
+	CHECK(setup(s, 1, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.arc.timeout_ms = 30000;
+	R.c.cfg.shutdown_timeout_s = 0.5;
+	R.c.cfg.interval_s = 0.05;
+	R.c.cfg.flush_interval_s = 0.05;
+	CHECK(rtc_collector_start(&R.c) == 0);
+	for (int i = 0; i < 100 && fake_arc_requests(R.f) == 0; i++) {
+		struct timespec ts = {0, 20000000};
+		nanosleep(&ts, NULL);
+	}
+	CHECK_EQ_U(fake_arc_requests(R.f), 1); /* the request is hanging now */
+	uint64_t t0 = rtc_mono_ns();
+	rtc_collector_stop(&R.c);
+	double took = since(t0);
+	fprintf(stderr, "     stop took %.2fs\n", took);
+	CHECK(took < 1.0);
+	/* The hung request went out: its records are of unknown outcome; those
+	 * gathered meanwhile are counted as dropped. Nothing vanishes. */
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	uint64_t accounted = rtc_counter_get(&K()->records_sent) + rtc_counter_get(&K()->records_dropped) +
+	                     rtc_counter_get(&K()->records_outcome_unknown);
+	CHECK_EQ_U(accounted, gathered);
+	CHECK(rtc_counter_get(&K()->records_outcome_unknown) > 0);
+	teardown();
+}
+
+static void threads_deliver_and_stop_cleanly(void)
+{
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.interval_s = 0.02;
+	R.c.cfg.flush_interval_s = 0.05;
+	CHECK(rtc_collector_start(&R.c) == 0);
+	struct timespec ts = {0, 300000000};
+	nanosleep(&ts, NULL);
+	rtc_collector_stop(&R.c);
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK(gathered > 5);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), gathered);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_dropped), 0);
+	teardown();
+}
+
+static void once_exit_codes(void)
+{
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	CHECK_EQ_U(rtc_collector_run_once(&R.c), 0);
+	teardown();
+
+	fake_reply s[] = {{400, "{\"error\":\"malformed MessagePack\"}"}};
+	CHECK(setup(s, 1, 1 << 16, 1 << 14) == 0);
+	CHECK_EQ_U(rtc_collector_run_once(&R.c), 1);
+	teardown();
+
+	fake_reply h[] = {{0, ""}};
+	CHECK(setup(h, 1, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.shutdown_timeout_s = 0.5;
+	uint64_t t0 = rtc_mono_ns();
+	CHECK_EQ_U(rtc_collector_run_once(&R.c), 1);
+	CHECK(since(t0) < 1.5);
+	teardown();
+}
+
+const t_case lifecycle_cases[] = {
+    {"lifecycle", "shutdown_budget_bounds_a_hanging_request", shutdown_budget_bounds_a_hanging_request},
+    {"lifecycle", "threads_deliver_and_stop_cleanly", threads_deliver_and_stop_cleanly},
+    {"lifecycle", "once_exit_codes", once_exit_codes},
     {0},
 };

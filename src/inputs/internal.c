@@ -48,9 +48,9 @@ static int gather(rtc_collector *c)
 		F(&b, "requests", &q->requests);
 		F(&b, "request_errors", &q->request_errors);
 		F(&b, "retries", &q->retries);
-		F(&b, "values_clamped", &q->values_clamped);
 		F(&b, "fields_nonfinite", &q->fields_nonfinite);
 		F(&b, "type_conflicts", &q->type_conflicts);
+		F(&b, "columns_over_limit", &q->columns_over_limit);
 		F(&b, "invalid_names", &q->invalid_names);
 		F(&b, "last_status", &q->last_status);
 		rtc_emit(c, &b);

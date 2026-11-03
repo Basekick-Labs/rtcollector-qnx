@@ -293,7 +293,61 @@ static void stress_every_record_delivered_once_or_counted(void)
 	rtc_ring_free(&r);
 }
 
+/* Eviction must not pass another output's claim: with output 0 copying,
+ * output 1 must not lose records silently (review H2). */
+typedef struct {
+	rtc_ring *r;
+	enum rtc_push_result res;
+} one_push;
+
+static void push_one(void *arg)
+{
+	one_push *p = arg;
+	uint8_t b[128];
+	make_payload(b, 77, 60);
+	p->res = rtc_ring_push(p->r, b, 60, 0);
+	p->r->copy_hook = NULL;
+}
+
+static void eviction_respects_claims_of_every_output(void)
+{
+	rtc_ring r;
+	CHECK(rtc_ring_init(&r, 128, 100, 2) == 0);
+	push_n(&r, 0, 1, 60); /* 80 of 128 bytes */
+	one_push p = {&r, RTC_PUSH_OK};
+	r.copy_hook = push_one;
+	r.copy_hook_arg = &p;
+	uint8_t dst[256];
+	rtc_ring_rec recs[4];
+	uint64_t dropped;
+	CHECK_EQ_U(rtc_ring_read(&r, 0, dst, sizeof(dst), recs, 4, NULL, NULL, &dropped), 1);
+	CHECK(p.res == RTC_PUSH_DROPPED); /* evicting seq 0 would pass output 0's claim */
+	/* Output 1 still gets seq 0. */
+	CHECK_EQ_U(rtc_ring_read(&r, 1, dst, sizeof(dst), recs, 4, NULL, NULL, &dropped), 1);
+	CHECK_EQ_U(dropped, 0);
+	CHECK_EQ_U(rtc_ring_unseen(&r, 1), 0);
+	rtc_ring_free(&r);
+}
+
+/* An eviction that empties the ring is still counted once the producer stops. */
+static void unseen_counts_evictions_without_a_later_record(void)
+{
+	rtc_ring r;
+	CHECK(rtc_ring_init(&r, 256, 100, 1) == 0);
+	push_n(&r, 0, 10, 60);
+	CHECK_EQ_U(rtc_ring_unseen(&r, 0), 10);
+	uint8_t dst[512];
+	rtc_ring_rec recs[16];
+	uint64_t dropped;
+	rtc_ring_read(&r, 0, dst, sizeof(dst), recs, 16, NULL, NULL, &dropped);
+	CHECK_EQ_U(rtc_ring_unseen(&r, 0), 0);
+	rtc_ring_free(&r);
+}
+
 const t_case ring_cases[] = {
+    {"ring", "eviction_respects_claims_of_every_output", eviction_respects_claims_of_every_output},
+    {"ring", "unseen_counts_evictions_without_a_later_record",
+     unseen_counts_evictions_without_a_later_record},
     {"ring", "roundtrip_and_wrap_at_every_offset", roundtrip_and_wrap_at_every_offset},
     {"ring", "eviction_is_counted_by_seq_gap", eviction_is_counted_by_seq_gap},
     {"ring", "oversize_is_refused", oversize_is_refused},

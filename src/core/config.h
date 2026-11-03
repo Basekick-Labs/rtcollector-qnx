@@ -1,9 +1,9 @@
 /* Configuration: rtcollector's YAML shape.
  *
  *   interval: 10            seconds between collection rounds
- *   flush_interval: 60      seconds between sends (also sends when a batch fills)
+ *   flush_interval: =interval  seconds between sends (also sends when a batch fills)
  *   buffer_bytes: 1MiB      ring size, allocated once (rounded to a power of two)
- *   max_record_bytes: 4096  largest record an input may produce
+ *   max_record_bytes: 4096  largest record an input may produce (min 512)
  *   max_buffer_size: 5000   accepted from rtcollector configs, ignored (see docs)
  *   warn_on_buffer: true
  *   hostname: ''            empty: gethostname()
@@ -13,7 +13,7 @@
  *   shutdown_timeout: 5     seconds for the final flush
  *   inputs: [internal, ...] a name, or {name: {config}}
  *   outputs:
- *     - arc: {url, database, token, batch_bytes, timeout, max_measurements_per_batch}
+ *     - arc: {url, database, token, batch_bytes, timeout, max_measurements_per_batch (1-256)}
  *     - stdout: {}
  */
 #ifndef RTC_CONFIG_H
@@ -37,6 +37,7 @@ typedef struct {
 	char database[65];
 	char token[512];
 	size_t batch_bytes;
+	bool batch_set; /* batch_bytes given explicitly */
 	uint32_t timeout_ms;
 	uint32_t max_measurements;
 } rtc_arc_cfg;
@@ -44,6 +45,7 @@ typedef struct {
 typedef struct {
 	bool enabled;
 	size_t batch_bytes;
+	bool batch_set;
 } rtc_stdout_cfg;
 
 typedef struct {

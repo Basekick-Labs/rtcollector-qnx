@@ -18,15 +18,20 @@
 #include "arc_encode.h"
 
 #include <curl/curl.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zstd.h>
 
-#define RESP_CAP 8192
+/* Arc's 500 body lists every written measurement twice (in the message and
+ * in written_measurements); with max_measurements_per_batch <= 256 and names
+ * <= 128 bytes it stays well under this. */
+#define RESP_CAP (160 * 1024)
 
 typedef struct {
 	CURL *curl;
+	CURLM *multi;
 	struct curl_slist *headers;
 	char url[600];
 	ZSTD_CCtx *zctx;
@@ -88,19 +93,49 @@ static bool accept_rec(void *arg, const rtc_ring_rec *rec)
 	return true;
 }
 
+/* Runs one request through the multi interface so the shutdown / --once
+ * deadline (abort_after_ns) is checked every 50 ms, including for a request
+ * that started before the deadline existed. An abort is reported as
+ * CURLE_ABORTED_BY_CALLBACK. */
 static long post(rtc_output *o, const uint8_t *body, size_t len, uint32_t timeout_ms, CURLcode *cc)
 {
 	arc_impl *a = o->impl;
 	a->resp_len = 0;
 	a->resp[0] = '\0';
-	curl_easy_setopt(a->curl, CURLOPT_POSTFIELDS, (const char *)body);
-	curl_easy_setopt(a->curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len);
-	curl_easy_setopt(a->curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+	CURLcode e = curl_easy_setopt(a->curl, CURLOPT_POSTFIELDS, (const char *)body);
+	e |= curl_easy_setopt(a->curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len);
+	e |= curl_easy_setopt(a->curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+	if (e != CURLE_OK || curl_multi_add_handle(a->multi, a->curl) != CURLM_OK) {
+		*cc = e != CURLE_OK ? e : CURLE_FAILED_INIT;
+		return 0;
+	}
 	rtc_counter_add(&o->counters.requests, 1);
-	*cc = curl_easy_perform(a->curl);
+	*cc = CURLE_OK;
+	for (;;) {
+		int running = 0;
+		if (curl_multi_perform(a->multi, &running) != CURLM_OK) {
+			*cc = CURLE_FAILED_INIT;
+			break;
+		}
+		if (!running) {
+			int left;
+			CURLMsg *m;
+			while ((m = curl_multi_info_read(a->multi, &left)))
+				if (m->msg == CURLMSG_DONE)
+					*cc = m->data.result;
+			break;
+		}
+		uint64_t abort_after = atomic_load(&o->collector->abort_after_ns);
+		if (abort_after && rtc_mono_ns() >= abort_after) {
+			*cc = CURLE_ABORTED_BY_CALLBACK;
+			break;
+		}
+		curl_multi_poll(a->multi, NULL, 0, 50, NULL);
+	}
 	long status = 0;
 	if (*cc == CURLE_OK)
 		curl_easy_getinfo(a->curl, CURLINFO_RESPONSE_CODE, &status);
+	curl_multi_remove_handle(a->multi, a->curl);
 	rtc_counter_set(&o->counters.last_status, (uint64_t)status);
 	return status;
 }
@@ -152,7 +187,7 @@ static size_t remaining(const rtc_output *o)
 	return n;
 }
 
-static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
+static enum rtc_send_outcome send_batch(rtc_output *o, uint64_t deadline_ns)
 {
 	arc_impl *a = o->impl;
 	rtc_collector *c = o->collector;
@@ -163,8 +198,8 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 		return RTC_SEND_DONE;
 	size_t n = o->nrecs - first < o->limit ? o->nrecs - first : o->limit;
 
-	size_t len = rtc_arc_encode(&a->enc, &c->cfg, c->cfg.hostname, o->recs, o->done, first, n, a->verdict,
-	                            &o->counters, a->mp, a->mp_cap);
+	size_t len = rtc_arc_encode(&a->enc, &c->cfg, c->cfg.hostname, o->recs, o->done, o->flags, first, n,
+	                            a->verdict, &o->counters, a->mp, a->mp_cap);
 	for (size_t i = first; i < first + n; i++)
 		if (a->verdict[i] == RTC_V_REJECTED) {
 			o->done[i] = 1;
@@ -188,8 +223,14 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 	}
 
 	uint32_t timeout = c->cfg.arc.timeout_ms;
-	if (timeout_cap_ms && timeout_cap_ms < timeout)
-		timeout = timeout_cap_ms;
+	if (deadline_ns) {
+		uint64_t now = rtc_mono_ns();
+		if (now >= deadline_ns)
+			return RTC_SEND_RETRY; /* out of time; the caller accounts for the rest */
+		uint64_t left_ms = (deadline_ns - now) / 1000000u;
+		if (left_ms < timeout)
+			timeout = left_ms ? (uint32_t)left_ms : 1;
+	}
 	CURLcode cc;
 	long status = post(o, a->z, zl, timeout, &cc);
 
@@ -199,9 +240,15 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 
 	if (cc != CURLE_OK) {
 		rtc_counter_add(&o->counters.request_errors, 1);
-		if (cc == CURLE_OPERATION_TIMEDOUT && timeout_cap_ms &&
-		    timeout_cap_ms <= c->cfg.arc.timeout_ms) {
-			/* Cut off by the shutdown budget: Arc may have written it. */
+		uint64_t abort_after = atomic_load(&c->abort_after_ns);
+		curl_off_t uploaded = 0;
+		curl_easy_getinfo(a->curl, CURLINFO_SIZE_UPLOAD_T, &uploaded);
+		bool out_of_time = abort_after && rtc_mono_ns() + 1000000u >= abort_after;
+		if ((cc == CURLE_OPERATION_TIMEDOUT || cc == CURLE_ABORTED_BY_CALLBACK) && out_of_time &&
+		    uploaded > 0) {
+			/* Cut off by the shutdown budget after the body went out: Arc may
+			 * have written it. If nothing was sent, the records stay unsent
+			 * and are counted as dropped at shutdown. */
 			for (size_t i = first; i < first + n; i++)
 				if (a->verdict[i] == RTC_V_SENT)
 					o->done[i] = 1;
@@ -226,7 +273,9 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 		rtc_counter_add(&o->counters.records_sent, in_req);
 		a->auth_logged = false;
 		a->last_logged_status = 0;
-		o->limit = o->nrecs; /* allow full requests again after a split */
+		/* After a split, grow back gradually instead of failing again at full size. */
+		if (o->limit < o->max_recs)
+			o->limit = o->limit > o->max_recs / 2 ? o->max_recs : o->limit * 2;
 		return remaining(o) ? RTC_SEND_AGAIN : RTC_SEND_DONE;
 	}
 
@@ -236,10 +285,17 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 			if (a->verdict[i] == RTC_V_SENT)
 				o->done[i] = 1;
 		uint64_t pts = partial_points(a->resp);
-		if (pts) {
+		if (pts && strstr(a->resp, "the other points were written")) {
 			rtc_counter_add(&o->counters.points_dropped_partial, pts);
-			rtc_counter_add(&o->counters.records_sent, in_req); /* the others were written */
+			rtc_counter_add(&o->counters.records_sent,
+			                in_req); /* approximate: rows, not points */
 			log_status(o, status, "Arc dropped some points and wrote the rest");
+		} else if (pts) {
+			/* "partial write" without "the other points were written": Arc
+			 * dropped every point of the request. */
+			rtc_counter_add(&o->counters.points_dropped_partial, pts);
+			rtc_counter_add(&o->counters.records_rejected, in_req);
+			log_status(o, status, "Arc dropped every point of the request");
 		} else {
 			rtc_counter_add(&o->counters.records_rejected, in_req);
 			log_status(o, status, "Arc refused the request; its records are dropped");
@@ -276,6 +332,10 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint32_t timeout_cap_ms)
 			}
 		}
 		rtc_counter_add(&o->counters.records_sent, wrote);
+		/* Points Arc left out for their content inside the written part. */
+		const char *pd = strstr(a->resp, "\"points_dropped\":");
+		if (pd)
+			rtc_counter_add(&o->counters.points_dropped_partial, strtoull(pd + 17, NULL, 10));
 		log_status(o, status,
 		           "Arc stopped part-way; resending only the measurements it did not write");
 		if (++a->partial_resends > 1) {
@@ -299,6 +359,8 @@ static void destroy(rtc_output *o)
 {
 	arc_impl *a = o->impl;
 	if (a) {
+		if (a->multi)
+			curl_multi_cleanup(a->multi);
 		if (a->curl)
 			curl_easy_cleanup(a->curl);
 		curl_slist_free_all(a->headers);
@@ -345,7 +407,8 @@ int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out)
 	if (!a->mp || !a->z || !a->verdict || !a->zctx ||
 	    rtc_arc_enc_init(&a->enc, o->max_recs, cfg->max_measurements))
 		goto fail;
-	ZSTD_CCtx_setParameter(a->zctx, ZSTD_c_compressionLevel, 3);
+	if (ZSTD_isError(ZSTD_CCtx_setParameter(a->zctx, ZSTD_c_compressionLevel, 3)))
+		goto fail;
 
 	snprintf(a->url, sizeof(a->url), "%s/api/v1/write/msgpack", cfg->url);
 	size_t ul = strlen(cfg->url);
@@ -353,24 +416,36 @@ int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out)
 		snprintf(a->url, sizeof(a->url), "%sapi/v1/write/msgpack", cfg->url);
 
 	char h[700];
-	a->headers = curl_slist_append(NULL, "Content-Type: application/msgpack");
+	const char *hdrs[4] = {"Content-Type: application/msgpack", NULL, "Expect:", NULL};
 	snprintf(h, sizeof(h), "x-arc-database: %s", cfg->database);
-	a->headers = curl_slist_append(a->headers, h);
+	hdrs[1] = h;
+	for (int k = 0; k < 3; k++) {
+		struct curl_slist *next = curl_slist_append(a->headers, hdrs[k]);
+		if (!next)
+			goto fail; /* destroy() frees what was appended so far */
+		a->headers = next;
+	}
 	if (cfg->token[0]) {
 		snprintf(h, sizeof(h), "Authorization: Bearer %s", cfg->token);
-		a->headers = curl_slist_append(a->headers, h);
+		struct curl_slist *next = curl_slist_append(a->headers, h);
+		if (!next)
+			goto fail;
+		a->headers = next;
 	}
-	a->headers = curl_slist_append(a->headers, "Expect:");
 	a->curl = curl_easy_init();
-	if (!a->headers || !a->curl)
+	if (!a->curl)
 		goto fail;
-	curl_easy_setopt(a->curl, CURLOPT_URL, a->url);
-	curl_easy_setopt(a->curl, CURLOPT_HTTPHEADER, a->headers);
-	curl_easy_setopt(a->curl, CURLOPT_POST, 1L);
-	curl_easy_setopt(a->curl, CURLOPT_NOSIGNAL, 1L);
-	curl_easy_setopt(a->curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
-	curl_easy_setopt(a->curl, CURLOPT_WRITEFUNCTION, on_body);
-	curl_easy_setopt(a->curl, CURLOPT_WRITEDATA, a);
+	CURLcode e = CURLE_OK;
+	e |= curl_easy_setopt(a->curl, CURLOPT_URL, a->url);
+	e |= curl_easy_setopt(a->curl, CURLOPT_HTTPHEADER, a->headers);
+	e |= curl_easy_setopt(a->curl, CURLOPT_POST, 1L);
+	e |= curl_easy_setopt(a->curl, CURLOPT_NOSIGNAL, 1L);
+	e |= curl_easy_setopt(a->curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
+	e |= curl_easy_setopt(a->curl, CURLOPT_WRITEFUNCTION, on_body);
+	e |= curl_easy_setopt(a->curl, CURLOPT_WRITEDATA, a);
+	a->multi = curl_multi_init();
+	if (e != CURLE_OK || !a->multi)
+		goto fail;
 	*out = o;
 	return 0;
 fail:

@@ -149,7 +149,7 @@ enum rtc_lp_result rtc_lp_parse(const char *line, size_t len, const rtc_lp_limit
 			nfields++;
 		} else {
 			int n = token(&c, ", ", "", val);
-			if (n < 0)
+			if (n <= 0) /* token() never returns 0, but be explicit */
 				return RTC_LP_MALFORMED;
 			char last = val[n - 1];
 			int bv;

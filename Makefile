@@ -78,7 +78,7 @@ CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config
             src/outputs/arc_encode.c src/outputs/arc.c src/outputs/stdout.c
 TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpack.c \
             tests/test_config.c tests/test_arc_encode.c tests/test_arc_http.c tests/fake_arc.c \
-            tests/mp_read.c tests/test_cpumath.c
+            tests/mp_read.c tests/test_cpumath.c tests/test_lp.c tests/test_lpdrain.c
 
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o) $(PLATFORM_SRC:%.c=$(BUILD)/%.o) $(YAML_OBJ)
 TEST_OBJ := $(TEST_SRC:%.c=$(BUILD)/%.o)

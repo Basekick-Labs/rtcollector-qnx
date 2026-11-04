@@ -288,7 +288,9 @@ static void *tracer_main(void *arg)
 	 * trace cannot be had: say so in the counters, not only in the log. */
 	if (rc != 0 && !atomic_load(&st.session_ending) && !atomic_load(&st.stopping)) {
 		if (rc == EPERM)
-			RTC_WARN(C, "kernel tracing needs root or PROCMGR_AID_TRACE; the collector runs without it");
+			RTC_WARN(
+			    C,
+			    "kernel tracing needs root or PROCMGR_AID_TRACE; the collector runs without it");
 		else
 			RTC_WARN(C, "kernel tracing failed: %s; the collector runs without it", strerror(rc));
 		rtc_counter_set(&st.k.unavailable, 1);
@@ -366,7 +368,8 @@ static void *monitor_main(void *arg)
 		 * Without it this one can never trace: say so in the counters, not
 		 * only in the log. */
 		if (rc == EEXIST)
-			RTC_WARN(C, "another process monitors the kernel trace (a second collector?); tracing disabled");
+			RTC_WARN(C, "another process monitors the kernel trace (a second collector?); "
+			            "tracing disabled");
 		else
 			RTC_WARN(C, "trace monitor ended: %s; tracing disabled", strerror(rc));
 		rtc_counter_set(&st.k.unavailable, 1);

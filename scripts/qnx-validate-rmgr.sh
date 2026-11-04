@@ -43,11 +43,11 @@ mal=$(echo "$st" | sed -n 's/.*malformed=\([0-9]*\).*/\1/p')
 [ "${mal:-0}" -ge 2 ] && ok "dprintf fragments counted as malformed ($mal)" || bad "malformed count $mal"
 
 # A second collector on the same path refuses it; the first keeps working.
-out=$(SER "./rtcollector --config rmgr.yml > /tmp/rm2.out 2>&1 & P=\$!; sleep 1.5; kill \$P; sleep 0.5; grep -c 'already registered' /tmp/rm2.out; ./rtc_writer -n 5 -s after2; sleep 1.5; grep -c '^after2,' /tmp/rm.out")
+out=$(SER "./rtcollector --config rmgr.yml > /tmp/rm2.out 2>&1 & P=\$!; sleep 1.5; kill \$P; sleep 0.5; grep -c 'another rtcollector already serves this path' /tmp/rm2.out; ./rtc_writer -n 5 -s after2; sleep 1.5; grep -c '^after2,' /tmp/rm.out")
 [ "$(echo "$out" | grep -E '^[0-9]+$' | tr '\n' ' ')" = "1 5 " ] && ok "second instance refused; first unaffected" || { bad "second instance"; echo "$out"; }
 
 # Two collectors started at the same moment: exactly one gets the device.
-out=$(SER "slay -s SIGKILL rtcollector >/dev/null 2>&1; sleep 0.5; ./rtcollector --config rmgr.yml > /tmp/ra.out 2>&1 & A=\$!; ./rtcollector --config rmgr.yml > /tmp/rb.out 2>&1 & B=\$!; sleep 1.5; cat /tmp/ra.out /tmp/rb.out | grep -c ' ready ('; cat /tmp/ra.out /tmp/rb.out | grep -c 'already registered'; kill \$A \$B; sleep 1")
+out=$(SER "slay -s SIGKILL rtcollector >/dev/null 2>&1; sleep 0.5; ./rtcollector --config rmgr.yml > /tmp/ra.out 2>&1 & A=\$!; ./rtcollector --config rmgr.yml > /tmp/rb.out 2>&1 & B=\$!; sleep 1.5; cat /tmp/ra.out /tmp/rb.out | grep -c ' ready ('; cat /tmp/ra.out /tmp/rb.out | grep -c 'another rtcollector already serves this path'; kill \$A \$B; sleep 1")
 [ "$(echo "$out" | grep -E '^[0-9]+$' | tr '\n' ' ')" = "1 1 " ] && ok "simultaneous start: one owner, one refused" || { bad "simultaneous start"; echo "$out"; }
 
 # Non-root: registering a path needs PROCMGR_AID_PATHSPACE; the collector runs on.

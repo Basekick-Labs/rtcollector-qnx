@@ -296,11 +296,6 @@ static void stop(rtc_collector *c)
 
 static void start(rtc_collector *c)
 {
-	struct stat sb;
-	if (stat(c->cfg.rmgr_path, &sb) == 0) {
-		unavailable(c, "the path is already registered (another collector?)");
-		return;
-	}
 	/* Fixed priority: handlers run at rmgr_priority, not the writer's. */
 	st.chid = ChannelCreate(_NTO_CHF_DISCONNECT | _NTO_CHF_UNBLOCK | _NTO_CHF_FIXED_PRIORITY);
 	st.dpp = st.chid == -1 ? NULL : dispatch_create_channel(st.chid, 0);
@@ -308,21 +303,35 @@ static void start(rtc_collector *c)
 		unavailable(c, strerror(errno));
 		return;
 	}
-	/* Exclusive claim on the path, atomic: name_attach fails with EEXIST if
-	 * another collector holds the same name (stat above can race with a
-	 * collector starting at the same moment). The name vanishes with the
-	 * process, so a crash leaves no stale lock. Its own dispatch handle
-	 * (NULL): name_attach's error and detach paths must not touch the
-	 * device's handle (they corrupted it in testing). */
-	char name[sizeof(c->cfg.rmgr_path) + 16];
-	snprintf(name, sizeof(name), "rtcollector%s", c->cfg.rmgr_path);
-	for (char *q = name; *q; q++)
-		if (*q == '/')
-			*q = '_';
+	/* Exclusive claim between collectors, atomic: name_attach fails with
+	 * EEXIST if another collector holds the same name. The name vanishes with
+	 * the process, so a crash leaves no stale lock. The path is escaped
+	 * unambiguously ('_' -> "__", '/' -> "_s"), so distinct paths never share
+	 * a name. Its own dispatch handle (NULL): name_attach's error and detach
+	 * paths must not touch the device's handle (they corrupted it in
+	 * testing). */
+	char name[2 * sizeof(c->cfg.rmgr_path) + 16];
+	size_t n = (size_t)snprintf(name, sizeof(name), "rtcollector");
+	for (const char *q = c->cfg.rmgr_path; *q && n + 3 < sizeof(name); q++) {
+		if (*q == '_' || *q == '/') {
+			name[n++] = '_';
+			name[n++] = *q == '_' ? '_' : 's';
+		} else {
+			name[n++] = *q;
+		}
+	}
+	name[n] = '\0';
 	st.lock = name_attach(NULL, name, 0);
 	if (!st.lock) {
-		unavailable(c, errno == EEXIST ? "the path is already registered (another collector?)"
+		unavailable(c, errno == EEXIST ? "another rtcollector already serves this path"
 		                               : strerror(errno));
+		teardown();
+		return;
+	}
+	/* Something else (not a collector) registered the path. */
+	struct stat sb;
+	if (stat(c->cfg.rmgr_path, &sb) == 0) {
+		unavailable(c, "the path already exists (another program?)");
 		teardown();
 		return;
 	}

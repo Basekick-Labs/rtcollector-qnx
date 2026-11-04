@@ -268,6 +268,8 @@ static void rotate(bool start_next)
 			close(st.fd);
 			unlink(st.path);
 			st.fd = -1;
+		} else {
+			st.file_bytes = st.hdr_len; /* counts toward trace_max_bytes */
 		}
 	}
 	pthread_mutex_unlock(&st.fmu);
@@ -280,6 +282,34 @@ static void sleep_ms(unsigned ms)
 }
 
 static void unavailable(void);
+
+/* pthread_join with a deadline; false if the thread is still running. */
+static bool join_within(pthread_t t, unsigned ms)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ts.tv_sec += ms / 1000;
+	ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+	return pthread_timedjoin_monotonic(t, NULL, &ts) == 0;
+}
+
+/* Stops the tracer thread: tracelog_stop only reaches a tracelog_start
+ * already running, so ask again until the thread has returned. */
+static void stop_tracer(void)
+{
+	atomic_store(&st.session_ending, true);
+	for (unsigned i = 0; i < 50; i++) {
+		tracelog_stop(st.in);
+		if (join_within(st.tracer, 100))
+			return;
+	}
+	RTC_WARN(C, "the trace thread did not stop within 5 s; waiting for it");
+	pthread_join(st.tracer, NULL);
+}
 
 /* Nanoseconds from now until t (CLOCK_MONOTONIC), 0 if t has passed. */
 static uint64_t ns_until(const struct timespec *t)
@@ -302,7 +332,12 @@ static void *rotator_main(void *arg)
 		uint64_t ns = (uint64_t)next.tv_nsec + interval_ns;
 		next.tv_sec += (time_t)(ns / 1000000000u);
 		next.tv_nsec = (long)(ns % 1000000000u);
-		for (;;) { /* in steps of at most 20 ms, to notice stop_rotator */
+		struct timespec t;
+		clock_gettime(CLOCK_MONOTONIC, &t);
+		if ((int64_t)(t.tv_sec - next.tv_sec) * 1000000000 + (t.tv_nsec - next.tv_nsec) >
+		    (int64_t)interval_ns)
+			next = t; /* starved for more than an interval: no burst of rotations */
+		for (;;) {        /* in steps of at most 20 ms, to notice stop_rotator */
 			uint64_t left = ns_until(&next);
 			if (left == 0 || atomic_load(&st.stop_rotator))
 				break;
@@ -333,6 +368,8 @@ static void *rotator_main(void *arg)
 			RTC_WARN(C,
 			         "the trace header was not captured in the first interval; tracing disabled");
 			unavailable();
+			atomic_store(&st.session_ending, true);
+			tracelog_stop(st.in); /* the tracer returns; session_stop joins it later */
 			break;
 		}
 		first = false;
@@ -344,6 +381,8 @@ static void *rotator_main(void *arg)
 static void *tracer_main(void *arg)
 {
 	(void)arg;
+	if (atomic_load(&st.session_ending))
+		return NULL; /* stopped before it started */
 	/* The writer callback runs on this thread, at its priority. */
 	int rc = tracelog_start(st.in, 1);
 	/* tracelog_start returns when the session ends; a failure that is not
@@ -423,9 +462,7 @@ static void session_start(void)
 	if (rtc_start_thread(st.c, &st.rotator, rotator_main, NULL, st.c->cfg.trace_priority,
 	                     "trace rotator") != 0) {
 		RTC_WARN(C, "cannot start the trace rotator thread; tracing disabled");
-		atomic_store(&st.session_ending, true);
-		tracelog_stop(st.in);
-		pthread_join(st.tracer, NULL);
+		stop_tracer();
 		tracelog_instance_destroy(st.in);
 		st.in = NULL;
 		discard_current();
@@ -444,8 +481,7 @@ static void session_stop(void)
 	atomic_store(&st.stop_rotator, true);
 	atomic_store(&st.session_ending, true);
 	pthread_join(st.rotator, NULL);
-	tracelog_stop(st.in);
-	pthread_join(st.tracer, NULL);
+	stop_tracer();
 	tracelog_instance_destroy(st.in);
 	st.in = NULL;
 	rotate(false); /* on a yield the partial interval is parsed; at shutdown it is dropped */
@@ -588,27 +624,33 @@ static int cb_control(struct traceparser_state *s, void *u, unsigned h, unsigned
 
 static void parse_file(const char *path, bool discont, uint64_t end_ns)
 {
-	struct traceparser_state *s = traceparser_init(NULL);
-	if (!s) {
-		rtc_counter_add(&st.k.parse_errors, 1);
-		return;
-	}
-	st.cps = 0;
-	st.no_clock = 0;
-	traceparser_cs_range(s, NULL, cb_thread, _NTO_TRACE_THREAD, _NTO_TRACE_THFIRST, _NTO_TRACE_THLAST);
-	traceparser_cs(s, NULL, cb_names, _NTO_TRACE_PROCESS, _NTO_TRACE_PROCTHREAD_NAME);
-	traceparser_cs(s, NULL, cb_names, _NTO_TRACE_PROCESS, _NTO_TRACE_PROCCREATE_NAME);
-	traceparser_cs_range(s, NULL, cb_int, _NTO_TRACE_INT, _NTO_TRACE_INTFIRST, _NTO_TRACE_INTLAST);
-	traceparser_cs(s, NULL, cb_control, _NTO_TRACE_CONTROL, _NTO_TRACE_CONTROLDROPPED);
 	if (discont)
 		rtc_sched_dropped(&st.sched, 0); /* the gap is counted where it happened */
 	uint64_t before = st.sched.events;
 	struct timespec a, z;
 	clock_gettime(CLOCK_MONOTONIC, &a);
-	if (traceparser(s, NULL, path) != 0 || st.no_clock)
+	bool ok = false;
+	struct traceparser_state *s = traceparser_init(NULL);
+	if (s) {
+		st.cps = 0;
+		st.no_clock = 0;
+		traceparser_cs_range(s, NULL, cb_thread, _NTO_TRACE_THREAD, _NTO_TRACE_THFIRST,
+		                     _NTO_TRACE_THLAST);
+		traceparser_cs(s, NULL, cb_names, _NTO_TRACE_PROCESS, _NTO_TRACE_PROCTHREAD_NAME);
+		traceparser_cs(s, NULL, cb_names, _NTO_TRACE_PROCESS, _NTO_TRACE_PROCCREATE_NAME);
+		traceparser_cs_range(s, NULL, cb_int, _NTO_TRACE_INT, _NTO_TRACE_INTFIRST,
+		                     _NTO_TRACE_INTLAST);
+		traceparser_cs(s, NULL, cb_control, _NTO_TRACE_CONTROL, _NTO_TRACE_CONTROLDROPPED);
+		ok = traceparser(s, NULL, path) == 0 && st.no_clock == 0;
+		traceparser_destroy(&s);
+	}
+	if (!ok) {
+		/* Part of the file was not read: the next file does not follow
+		 * what was applied, so pending waits are forgotten. */
 		rtc_counter_add(&st.k.parse_errors, 1);
+		rtc_sched_dropped(&st.sched, 0);
+	}
 	clock_gettime(CLOCK_MONOTONIC, &z);
-	traceparser_destroy(&s);
 	rtc_counter_add(&st.k.events, st.sched.events - before);
 	rtc_counter_set(&st.k.parse_ns,
 	                (uint64_t)(z.tv_sec - a.tv_sec) * 1000000000u + (uint64_t)(z.tv_nsec - a.tv_nsec));
@@ -641,7 +683,7 @@ static void *parser_main(void *arg)
 		while (st.qn == 0 && !atomic_load(&st.stopping))
 			pthread_cond_wait(&st.qcv, &st.qmu);
 		if (atomic_load(&st.stopping)) {
-			/* Shutdown: what is queued is not parsed (gather has stopped). */
+			/* Shutdown: what is queued is not parsed (nothing would send it). */
 			for (unsigned i = 0; i < st.qn; i++)
 				unlink(st.queue[i].path);
 			st.qn = 0;
@@ -740,20 +782,6 @@ static void start(rtc_collector *c)
 		rtc_counter_set(&st.k.unavailable, 1);
 		rtc_counter_set(&c->counters.trace_unavailable, 1);
 	}
-}
-
-/* pthread_join with a deadline; false if the thread is still running. */
-static bool join_within(pthread_t t, unsigned ms)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	ts.tv_sec += ms / 1000;
-	ts.tv_nsec += (long)(ms % 1000) * 1000000L;
-	if (ts.tv_nsec >= 1000000000L) {
-		ts.tv_sec++;
-		ts.tv_nsec -= 1000000000L;
-	}
-	return pthread_timedjoin_monotonic(t, NULL, &ts) == 0;
 }
 
 static void stop(rtc_collector *c)

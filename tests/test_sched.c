@@ -219,7 +219,8 @@ static void idle_threads_evicted(void)
 	rtc_sched_free(&S);
 }
 
-/* A table with room evicts nothing: a long sleeper keeps its slot and name. */
+/* A table under three-quarters full evicts nothing: a long sleeper keeps its
+ * slot and name. */
 static void no_eviction_without_pressure(void)
 {
 	CHECK(rtc_sched_init(&S, 64) == 0);
@@ -229,6 +230,8 @@ static void no_eviction_without_pressure(void)
 	ev(0, 10, 9, 1, RTC_EV_READY, 50);
 	ev(0, 11, 9, 1, RTC_EV_RUNNING, 50);
 	ev(0, 12, 9, 1, RTC_EV_BLOCKED, 50);
+	for (uint32_t i = 1; i <= 40; i++) /* more than half full, under three-quarters */
+		ev(0, 13, 10, i, RTC_EV_BLOCKED, 10);
 	for (int i = 0; i < 5; i++)
 		rtc_sched_take(&S, 1, 40, 2, &o);
 	CHECK_EQ_U(S.threads_evicted, 0);

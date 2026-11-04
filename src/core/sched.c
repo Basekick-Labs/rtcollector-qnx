@@ -74,36 +74,62 @@ void rtc_sched_free(rtc_sched *s)
 	s->procs = NULL;
 }
 
-/* Open addressing on (pid, tid). Returns NULL when the table is full. */
+static size_t home(const rtc_sched *s, uint32_t pid, uint32_t tid)
+{
+	return ((size_t)pid * 2654435761u + tid) % s->max_threads;
+}
+
+/* Open addressing on (pid, tid), linear probing, no tombstones (slot_free
+ * shifts entries back), so a probe ends at the first empty slot. Returns
+ * NULL when the table is full. */
 static rtc_sched_thread *find(rtc_sched *s, uint32_t pid, uint32_t tid, bool create)
 {
-	size_t n = s->max_threads, h = ((size_t)pid * 2654435761u + tid) % n;
-	rtc_sched_thread *free_slot = NULL;
+	size_t n = s->max_threads, h = home(s, pid, tid);
 	for (size_t i = 0; i < n; i++) {
 		rtc_sched_thread *t = &s->threads[(h + i) % n];
 		if (t->used && t->pid == pid && t->tid == tid)
 			return t;
 		if (!t->used) {
-			if (!free_slot)
-				free_slot = t;
-			if (t->pid == 0 && t->tid == 0)
-				break; /* never used: the key is not further along */
+			if (!create)
+				return NULL;
+			if (s->nthreads + 1 >= n) { /* keep one slot empty: probes end */
+				s->threads_overflow++;
+				return NULL;
+			}
+			memset(t, 0, sizeof(*t));
+			t->used = true;
+			t->pid = pid;
+			t->tid = tid;
+			t->state = RTC_EV_BLOCKED;
+			t->max_prio = -1;
+			s->nthreads++;
+			return t;
 		}
 	}
-	if (!create)
-		return NULL;
-	if (!free_slot || s->nthreads + 1 >= n) { /* keep one slot empty: probes end */
-		s->threads_overflow++;
-		return NULL;
+	return NULL; /* not reached: one slot is always empty */
+}
+
+/* Empties slot i and moves later entries of its probe run back into the
+ * hole (backward-shift deletion), so lookups never need tombstones. */
+static void slot_free(rtc_sched *s, size_t i)
+{
+	size_t n = s->max_threads, j = i;
+	s->nthreads--;
+	for (;;) {
+		s->threads[i].used = false;
+		for (;;) {
+			j = (j + 1) % n;
+			if (!s->threads[j].used)
+				return;
+			size_t k = home(s, s->threads[j].pid, s->threads[j].tid);
+			/* Entry j stays if its home lies cyclically in (i, j]. */
+			if (i <= j ? (i < k && k <= j) : (i < k || k <= j))
+				continue;
+			break;
+		}
+		s->threads[i] = s->threads[j];
+		i = j;
 	}
-	memset(free_slot, 0, sizeof(*free_slot));
-	free_slot->used = true;
-	free_slot->pid = pid;
-	free_slot->tid = tid;
-	free_slot->state = RTC_EV_BLOCKED;
-	free_slot->max_prio = -1;
-	s->nthreads++;
-	return free_slot;
 }
 
 void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
@@ -112,9 +138,9 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 	if (e->kind == RTC_EV_DEAD) {
 		rtc_sched_thread *t = find(s, e->pid, e->tid, false);
 		if (t) {
-			/* Tombstone: keep pid/tid non-zero so probes continue past it. */
-			t->used = false;
-			s->nthreads--;
+			if (t->wakeups > 0 && t->pid != 1)
+				s->exited_unreported++;
+			slot_free(s, (size_t)(t - s->threads));
 		}
 		return;
 	}
@@ -130,6 +156,7 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 		return;
 	}
 	t->last_t = e->t_ns;
+	t->seen = true;
 	if (e->prio > t->max_prio)
 		t->max_prio = e->prio;
 	switch (e->kind) {
@@ -270,51 +297,60 @@ static bool reportable(const rtc_sched_thread *t)
 	return t->used && t->wakeups > 0 && t->pid != 1; /* pid 1 = procnto (idle threads) */
 }
 
+/* Adds up to k rows, highest p99 first, from the reportable threads on one
+ * side of min_prio. */
+static void pick(rtc_sched *s, int min_prio, bool high, size_t k, rtc_sched_snapshot *out)
+{
+	for (size_t n = 0; n < k && out->nrows < out->max_rows; n++) {
+		rtc_sched_thread *best = NULL;
+		for (size_t i = 0; i < s->max_threads; i++) {
+			rtc_sched_thread *t = &s->threads[i];
+			if (!reportable(t) || t->picked || (t->max_prio >= min_prio) != high)
+				continue;
+			if (!best || t->p99 > best->p99)
+				best = t;
+		}
+		if (!best)
+			return;
+		best->picked = true;
+		fill_row(s, best, &out->rows[out->nrows++]);
+	}
+}
+
 void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_sched_snapshot *out)
 {
 	out->nrows = 0;
-	out->threads_omitted = 0;
-	/* Pass 1: every thread at or above min_prio. */
+	out->threads_omitted = s->exited_unreported;
+	s->exited_unreported = 0;
+	size_t high = 0, others = 0;
 	for (size_t i = 0; i < s->max_threads; i++) {
-		const rtc_sched_thread *t = &s->threads[i];
-		if (!reportable(t) || t->max_prio < min_prio)
+		rtc_sched_thread *t = &s->threads[i];
+		t->picked = false;
+		if (!reportable(t))
 			continue;
-		if (out->nrows < out->max_rows)
-			fill_row(s, t, &out->rows[out->nrows++]);
+		t->p99 = rtc_hist_quantile(&t->lat, 0.99);
+		if (t->max_prio >= min_prio)
+			high++;
 		else
-			out->threads_omitted++;
+			others++;
 	}
-	/* Pass 2: the top `top` others by p99 (selection by repeated maximum:
-	 * top is small). */
-	size_t first_other = out->nrows;
-	for (size_t k = 0; k < top && out->nrows < out->max_rows; k++) {
-		const rtc_sched_thread *best = NULL;
-		uint64_t best_p99 = 0;
+	/* Pass 1: every thread at or above min_prio (the worst p99 first when
+	 * they do not all fit). */
+	if (high <= out->max_rows) {
 		for (size_t i = 0; i < s->max_threads; i++) {
-			const rtc_sched_thread *t = &s->threads[i];
-			if (!reportable(t) || t->max_prio >= min_prio)
-				continue;
-			bool taken = false;
-			for (size_t j = first_other; j < out->nrows; j++)
-				if (out->rows[j].pid == t->pid && out->rows[j].tid == t->tid)
-					taken = true;
-			if (taken)
-				continue;
-			uint64_t p99 = rtc_hist_quantile(&t->lat, 0.99);
-			if (!best || p99 > best_p99) {
-				best = t;
-				best_p99 = p99;
+			rtc_sched_thread *t = &s->threads[i];
+			if (reportable(t) && t->max_prio >= min_prio) {
+				t->picked = true;
+				fill_row(s, t, &out->rows[out->nrows++]);
 			}
 		}
-		if (!best)
-			break;
-		fill_row(s, best, &out->rows[out->nrows++]);
+	} else {
+		pick(s, min_prio, true, out->max_rows, out);
 	}
-	size_t others = 0;
-	for (size_t i = 0; i < s->max_threads; i++)
-		if (reportable(&s->threads[i]) && s->threads[i].max_prio < min_prio)
-			others++;
-	out->threads_omitted += others - (out->nrows - first_other);
+	size_t first_other = out->nrows;
+	/* Pass 2: the top `top` others by p99. */
+	pick(s, min_prio, false, top, out);
+	out->threads_omitted += (high - first_other) + (others - (out->nrows - first_other));
 
 	out->ncpu = ncpu < RTC_SCHED_MAX_CPUS ? ncpu : RTC_SCHED_MAX_CPUS;
 	memcpy(out->cpu_switches, s->cpu_switches, sizeof(out->cpu_switches));
@@ -326,9 +362,25 @@ void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_s
 	/* Reset the interval counters; keep state, names and vectors seen. */
 	for (size_t i = 0; i < s->max_threads; i++) {
 		rtc_sched_thread *t = &s->threads[i];
+		if (!t->used)
+			continue;
+		t->idle = t->seen ? 0 : t->idle + 1;
+		t->seen = false;
 		t->wakeups = t->preemptions = t->run_ns = 0;
 		t->max_prio = -1;
-		memset(&t->lat, 0, sizeof(t->lat));
+		if (t->lat.n)
+			memset(&t->lat, 0, sizeof(t->lat));
+	}
+	/* Evict threads idle for two intervals that are not ready or running: a
+	 * lost DEAD event must not hold a slot for ever. A READY thread is kept,
+	 * its wait is what this input reports. A freed slot can receive a later
+	 * entry, so each slot is checked until it holds a keeper. */
+	for (size_t i = 0; i < s->max_threads; i++) {
+		rtc_sched_thread *t = &s->threads[i];
+		while (t->used && t->idle >= 2 && t->state == RTC_EV_BLOCKED) {
+			slot_free(s, i);
+			s->threads_evicted++;
+		}
 	}
 	memset(s->cpu_switches, 0, sizeof(s->cpu_switches));
 	memset(s->cpu_interrupts, 0, sizeof(s->cpu_interrupts));

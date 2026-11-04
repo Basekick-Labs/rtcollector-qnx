@@ -182,6 +182,121 @@ static void out_of_order_ignored(void)
 	rtc_sched_free(&S);
 }
 
+/* Lost DEAD events: idle, blocked threads leave the table after two quiet
+ * intervals; a thread that is READY all along stays (its wait is the point). */
+static void idle_threads_evicted(void)
+{
+	CHECK(rtc_sched_init(&S, 16) == 0);
+	rtc_sched_snapshot o;
+	rtc_sched_snapshot_init(&o, 64);
+	for (uint32_t i = 1; i <= 15; i++) { /* fills the table; no DEAD ever */
+		ev(0, 10, 300, i, RTC_EV_READY, 10);
+		ev(0, 11, 300, i, RTC_EV_RUNNING, 10);
+		ev(0, 12, 300, i, RTC_EV_BLOCKED, 10);
+	}
+	ev(0, 20, 400, 1, RTC_EV_READY, 10); /* waits for ever */
+	CHECK_EQ_U(S.nthreads, 16);
+	rtc_sched_take(&S, 1, 40, 2, &o); /* they were seen in this interval */
+	CHECK_EQ_U(S.threads_evicted, 0);
+	rtc_sched_take(&S, 1, 40, 2, &o); /* one quiet interval */
+	CHECK_EQ_U(S.threads_evicted, 0);
+	rtc_sched_take(&S, 1, 40, 2, &o); /* two: the blocked ones go */
+	CHECK_EQ_U(S.threads_evicted, 15);
+	CHECK_EQ_U(S.nthreads, 1);
+	/* The READY thread kept its pending wakeup: it is measured when it runs. */
+	ev(0, 5000, 400, 1, RTC_EV_RUNNING, 10);
+	uint64_t ov = S.threads_overflow;
+	for (uint32_t i = 100; i < 110; i++) /* new threads get slots again */
+		ev(0, 6000, 500, i, RTC_EV_READY, 10);
+	CHECK_EQ_U(S.threads_overflow, ov);
+	rtc_sched_take(&S, 1, 40, 4, &o);
+	bool found = false;
+	for (size_t i = 0; i < o.nrows; i++)
+		if (o.rows[i].pid == 400 && o.rows[i].max_ns == 4980)
+			found = true;
+	CHECK(found);
+	rtc_sched_snapshot_free(&o);
+	rtc_sched_free(&S);
+}
+
+/* Backward-shift deletion keeps every lookup right under heavy churn:
+ * compare the table with a plain list of what should be in it. */
+static void deletion_keeps_lookups(void)
+{
+	CHECK(rtc_sched_init(&S, 64) == 0);
+	enum { KEYS = 200 };
+	bool live[KEYS] = {false};
+	uint32_t x = 12345;
+	for (int step = 0; step < 20000; step++) {
+		x = x * 1103515245u + 12345u;
+		uint32_t k = (x >> 8) % KEYS;
+		uint32_t pid = 7 + k % 5, tid = k; /* clustered homes */
+		if (live[k]) {
+			ev(0, (uint64_t)step + 1, pid, tid, RTC_EV_DEAD, 10);
+			live[k] = false;
+		} else if (S.nthreads < 60) {
+			ev(0, (uint64_t)step + 1, pid, tid, RTC_EV_READY, 10);
+			live[k] = true;
+		}
+		if (step % 997 == 0) { /* every live key is findable, nothing else is */
+			size_t n = 0;
+			for (uint32_t j = 0; j < KEYS; j++) {
+				size_t found = 0;
+				for (size_t i = 0; i < S.max_threads; i++)
+					if (S.threads[i].used && S.threads[i].pid == 7 + j % 5 &&
+					    S.threads[i].tid == j)
+						found++;
+				CHECK_EQ_U(found, live[j] ? 1 : 0);
+				n += live[j];
+			}
+			CHECK_EQ_U(S.nthreads, n);
+		}
+	}
+	/* And events still reach the right thread: a READY then RUNNING on
+	 * every live key records exactly one wakeup each. */
+	for (uint32_t j = 0; j < KEYS; j++)
+		if (live[j]) {
+			ev(0, 100000, 7 + j % 5, j, RTC_EV_BLOCKED, 10);
+			ev(0, 100001, 7 + j % 5, j, RTC_EV_READY, 10);
+			ev(0, 100003, 7 + j % 5, j, RTC_EV_RUNNING, 10);
+		}
+	CHECK_EQ_U(S.threads_overflow, 0);
+	rtc_sched_snapshot o;
+	rtc_sched_snapshot_init(&o, 64);
+	rtc_sched_take(&S, 1, 0, 0, &o);
+	CHECK_EQ_U(o.nrows, S.nthreads);
+	for (size_t i = 0; i < o.nrows; i++)
+		CHECK(o.rows[i].wakeups == 1 && o.rows[i].max_ns == 2);
+	rtc_sched_snapshot_free(&o);
+	rtc_sched_free(&S);
+}
+
+/* More high-priority threads than rows: the worst p99 are reported, not
+ * whichever the hash put first; a thread that woke and exited is omitted,
+ * counted. */
+static void high_priority_selection_by_latency(void)
+{
+	CHECK(rtc_sched_init(&S, 64) == 0);
+	for (uint32_t i = 1; i <= 10; i++) {
+		ev(0, 100, 50, i, RTC_EV_READY, 60);
+		ev(0, 100 + i * 1000, 50, i, RTC_EV_RUNNING, 60); /* latency i µs */
+	}
+	ev(0, 100, 51, 1, RTC_EV_READY, 60);
+	ev(0, 200, 51, 1, RTC_EV_RUNNING, 60);
+	ev(0, 300, 51, 1, RTC_EV_DEAD, 60);
+	rtc_sched_snapshot o;
+	rtc_sched_snapshot_init(&o, 3);
+	rtc_sched_take(&S, 1, 40, 2, &o);
+	CHECK_EQ_U(o.nrows, 3);
+	bool want[11] = {false};
+	for (size_t i = 0; i < o.nrows; i++)
+		want[o.rows[i].tid] = true;
+	CHECK(want[10] && want[9] && want[8]);
+	CHECK_EQ_U(o.threads_omitted, 7 + 1);
+	rtc_sched_snapshot_free(&o);
+	rtc_sched_free(&S);
+}
+
 const t_case sched_cases[] = {
     {"sched", "out_of_order_ignored", out_of_order_ignored},
     {"sched", "histogram", histogram},
@@ -190,5 +305,8 @@ const t_case sched_cases[] = {
     {"sched", "selection", selection},
     {"sched", "table_churn_and_overflow", table_churn_and_overflow},
     {"sched", "interrupts", interrupts},
+    {"sched", "idle_threads_evicted", idle_threads_evicted},
+    {"sched", "deletion_keeps_lookups", deletion_keeps_lookups},
+    {"sched", "high_priority_selection_by_latency", high_priority_selection_by_latency},
     {0},
 };

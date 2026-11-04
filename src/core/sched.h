@@ -57,6 +57,10 @@ typedef struct {
 	uint64_t ready_at, run_since;
 	uint64_t last_t; /* newest event applied: older ones arriving later are ignored */
 	char name[RTC_SCHED_NAME];
+	bool seen;     /* had an event this interval */
+	unsigned idle; /* intervals in a row without an event */
+	bool picked;   /* rtc_sched_take: already a row */
+	uint64_t p99;  /* rtc_sched_take: this interval's p99 */
 	/* interval counters */
 	uint64_t wakeups, preemptions, run_ns;
 	int max_prio;
@@ -79,7 +83,9 @@ typedef struct {
 	uint64_t vec_count[RTC_SCHED_MAX_VECTORS];
 	unsigned nvec;
 	uint64_t threads_overflow, vectors_overflow, events, drops;
-	uint64_t out_of_order; /* events older than the thread's newest, ignored */
+	uint64_t out_of_order;      /* events older than the thread's newest, ignored */
+	uint64_t threads_evicted;   /* idle threads dropped from the table (their DEAD was lost) */
+	uint64_t exited_unreported; /* threads that woke and exited before the interval's rows */
 } rtc_sched;
 
 int rtc_sched_init(rtc_sched *s, size_t max_threads);
@@ -117,8 +123,11 @@ void rtc_sched_snapshot_free(rtc_sched_snapshot *o);
 
 /* Copies the interval's rows into out and resets the interval counters.
  * Reported: threads that woke at least once (pid 1 idle threads excluded):
- * every one whose highest priority >= min_prio, then the top `top` others
- * by p99 latency, up to out->max_rows; the rest are counted as omitted. */
+ * those whose highest priority >= min_prio (by p99 latency if there are more
+ * than out->max_rows), then the `top` others with the highest p99, up to
+ * out->max_rows; the rest are counted as omitted. Threads without an event
+ * for two intervals that are not ready or running are evicted: their exit
+ * may have been in events the kernel or the collector dropped. */
 void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_sched_snapshot *out);
 
 #endif

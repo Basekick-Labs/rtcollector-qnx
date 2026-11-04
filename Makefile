@@ -91,15 +91,15 @@ $(BUILD)/third_party/%.o: third_party/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(THIRD_PARTY_CFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: %.c
+$(BUILD)/%.o: %.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD)/rtcollector: $(CORE_OBJ) $(BUILD)/src/main.o
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+$(BUILD)/rtcollector: $(CORE_OBJ) $(BUILD)/src/main.o Makefile
+	$(CC) $(LDFLAGS) $(filter %.o,$^) $(LDLIBS) -o $@
 
-$(BUILD)/rtc_tests: $(CORE_OBJ) $(TEST_OBJ)
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+$(BUILD)/rtc_tests: $(CORE_OBJ) $(TEST_OBJ) Makefile
+	$(CC) $(LDFLAGS) $(filter %.o,$^) $(LDLIBS) -o $@
 
 test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
 	$(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'

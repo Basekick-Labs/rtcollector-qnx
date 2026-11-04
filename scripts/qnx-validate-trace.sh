@@ -124,9 +124,9 @@ echo "$out" | grep -qE 'left=[1-9]' && [ "$(echo "$out" | grep -E '^[0-9]+$' | t
 out=$(SER "cd /tmp; ./rtcollector --config trace-big.yml > /tmp/tb.out 2>&1 & P=\$!; for c in 0 1 2 3; do on -C \$c -p 9 ./rtc_hog -b 1000 -s 0 -t 40 & done; sleep 8; t0=\$(date +%s); kill \$P; while kill -0 \$P 2>/dev/null; do sleep 0.2; done; echo took=\$(( \$(date +%s) - t0 )); slay -f rtc_hog; sleep 1; echo stuck=\$(grep -c 'parser did not stop within' /tmp/tb.out); echo files=\$(ls /dev/shmem | grep -c rtcollector-trace); ./rtcollector --config trace.yml > /dev/null 2>&1 & sleep 2; slay -f rtcollector; sleep 1; echo after=\$(ls /dev/shmem | grep -c rtcollector-trace)")
 tk=$(echo "$out" | sed -n 's/^took=\([0-9]*\)/\1/p' | tail -1)
 sk=$(echo "$out" | sed -n 's/^stuck=\([0-9]*\)/\1/p' | tail -1); fl=$(echo "$out" | sed -n 's/^files=\([0-9]*\)/\1/p' | tail -1); af=$(echo "$out" | sed -n 's/^after=\([0-9]*\)/\1/p' | tail -1)
-# The parser is starved mid-parse: stop() gives up on it after 2 s (stuck=1),
-# its file stays until the next start removes it.
-[ -n "$tk" ] && [ "$tk" -le 10 ] && [ "$sk" = "1" ] && [ "${fl:-9}" -le 1 ] && [ "$af" = "0" ] && ok "SIGTERM with a starved parser: exited in ${tk} s, parser left behind, ${fl} file removed by the next start" || { bad "shutdown: took=${tk:-?} stuck=${sk:-?} files=${fl:-?} after=${af:-?}"; echo "$out" | tail -4; }
+# The parser is starved: stop() raises it to collect_priority, it finishes
+# (callbacks are no-ops by then) and the process exits; no file is left.
+[ -n "$tk" ] && [ "$tk" -le 3 ] && [ "$sk" = "0" ] && [ "${fl:-9}" = "0" ] && ok "SIGTERM with a starved parser: exited in ${tk} s, no file left" || { bad "shutdown: took=${tk:-?} stuck=${sk:-?} files=${fl:-?} after=${af:-?}"; echo "$out" | tail -4; }
 
 left=$(SER "pidin -p rtcollector -f a | grep -c rtcollector" | grep -E '^[0-9]+$' | tail -1)
 [ "${left:-0}" -eq 0 ] && ok "no collector left running" || { bad "collectors left: $left"; SER "slay -f -s SIGKILL rtcollector"; }

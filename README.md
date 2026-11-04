@@ -182,9 +182,9 @@ How it works and what it costs:
 - Files are removed once parsed, and on exit; files left by a collector that
   was killed, or by a parse that shutdown did not wait for, are removed by
   the next collector's start. On shutdown, intervals not yet parsed are
-  dropped; the input's part of shutdown takes at most about 7 s (5 s for the
-  trace monitor, 2 s for a parse held off by busier threads), before
-  `shutdown_timeout`.
+  dropped. Shutdown runs at `collect_priority`, the parser included; the
+  input's part takes at most about 7 s (5 s for the trace monitor, 2 s for
+  the parser), before `shutdown_timeout`.
 - Only one process can trace at a time. When another tool asks for the trace
   (`tracelogger`, for example), the collector stops and gives it the trace
   (`yielded`), and starts again when it is done (`sessions`).

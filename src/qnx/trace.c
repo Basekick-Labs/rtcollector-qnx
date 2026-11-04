@@ -786,7 +786,6 @@ static void start(rtc_collector *c)
 
 static void stop(rtc_collector *c)
 {
-	(void)c;
 	atomic_store(&st.stopping, true);
 	if (st.monitor_running) {
 		/* tracelog_monitor_stop only reaches a monitor already waiting: if
@@ -806,8 +805,12 @@ static void stop(rtc_collector *c)
 		pthread_mutex_lock(&st.qmu);
 		pthread_cond_signal(&st.qcv);
 		pthread_mutex_unlock(&st.qmu);
-		/* Bounded: the callbacks are no-ops now, but a parse runs at the
-		 * lowest priority and busy real-time threads can hold it off. */
+		/* The parser runs below the sender; threads above it can hold it
+		 * off for ever, and a QNX process does not finish exiting until
+		 * each of its threads has run. Shutdown runs at collect_priority,
+		 * so the parser does too from here (its callbacks are no-ops now,
+		 * the rest of its file goes fast). Bounded all the same. */
+		pthread_setschedprio(st.parser, c->cfg.collect_priority);
 		if (join_within(st.parser, 2000)) {
 			st.parser_running = false;
 		} else {

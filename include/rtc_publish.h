@@ -27,10 +27,12 @@
 #define RTC_PUBLISH_MAX 1024
 #endif
 
+/* clang-format off: versions 18 and 23 disagree on the line after the attribute */
 #if defined(__GNUC__)
 __attribute__((format(printf, 2, 3)))
 #endif
 static inline int rtc_publish(int fd, const char *fmt, ...)
+/* clang-format on */
 {
 	char line[RTC_PUBLISH_MAX];
 	va_list ap;

@@ -11,13 +11,14 @@ for f in rtcollector rtc_writer rtc_hog; do [ -x "$B/$f" ] || { echo "no $B/$f: 
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 printf 'interval: 2\nflush_interval: 2\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace.yml"
+printf 'interval: 1\nflush_interval: 1\ntrace_interval: 3\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-slow.yml"
 printf 'interval: 2\nflush_interval: 2\ntrace_max_bytes: 64KiB\ntrace_max_threads: 16\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-small.yml"
 (cd "$B" && exec python3 -m http.server "$PORT" --bind 127.0.0.1) >/tmp/rtc-validate-http.log 2>&1 &
 HTTP=$!
 trap 'kill $HTTP 2>/dev/null || true' EXIT
 for _ in 1 2 3 4 5 6 7 8 9 10; do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/trace.yml" 2>/dev/null && break; sleep 0.3; done
 want=$(cksum <"$B/rtcollector" | awk '{print $1}')
-got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtc_writer rtc_hog trace.yml trace-small.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
+got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtc_writer rtc_hog trace.yml trace-small.yml trace-slow.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && ok "deployed (cksum $want)" || { bad "deploy: cksum $got vs $want"; exit 1; }
 
 # Known workload on CPU 1: prio-30 hog 5 ms busy / 5 ms idle, prio-40 thread
@@ -46,6 +47,12 @@ out=$(SER "cd /tmp; ./rtcollector --config trace-small.yml > /tmp/ts.out 2>&1 & 
 bd=$(field "$out" bytes_dropped); to=$(field "$out" threads_overflow)
 [ "${bd:-0}" -gt 0 ] && ok "byte cap: bytes_dropped=$bd" || bad "byte cap: bytes_dropped=${bd:-?}"
 [ "${to:-0}" -gt 0 ] && ok "thread table bound: threads_overflow=$to" || bad "threads_overflow=${to:-?}"
+
+# trace_interval longer than interval (non-default): one set of rows per
+# trace interval, none repeated in the rounds between, none lost.
+out=$(SER "cd /tmp; ./rtcollector --config trace-slow.yml > /tmp/tsl.out 2>&1 & sleep 10; slay -f rtcollector; sleep 1; grep ^cpu_sched,.*cpu=cpu0 /tmp/tsl.out | wc -l; grep ^internal_trace /tmp/tsl.out | tail -1")
+n=$(echo "$out" | grep -E '^ *[0-9]+$' | tail -1 | tr -d ' '); sl=$(field "$(echo "$out" | grep ^internal_trace)" snapshots_lost)
+[ -n "$n" ] && [ "$n" -ge 2 ] && [ "$n" -le 4 ] && [ "${sl:-1}" = "0" ] && ok "trace_interval 3 s at interval 1 s: $n intervals in 10 s, none lost" || { bad "trace_interval: rows=$n snapshots_lost=${sl:-?}"; echo "$out"; }
 
 # Starvation: four prio-30 hogs, one per CPU, above the logger (15): the
 # kernel drops events; they are counted and no garbage latency comes out.

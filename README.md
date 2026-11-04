@@ -265,6 +265,7 @@ outputs:
 | `outputs.arc.batch_bytes` | `256KiB` | Bytes of records per request, at most (default capped at half of `buffer_bytes`) |
 | `outputs.arc.timeout` | `10` | Request timeout, seconds |
 | `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request (1 to 256) |
+| `outputs.mqtt.*` | off | MQTT broker output; see [Sending to an MQTT broker](#sending-to-an-mqtt-broker-mqtt) |
 | `outputs.stdout` | off | Print rows as line protocol, for debugging. If nobody reads stdout (a full pipe), shutdown still ends within `shutdown_timeout`; the rows not written are counted as dropped |
 | `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records read from the buffer per batch |
 
@@ -275,7 +276,90 @@ rows.
 Data goes to Arc as columnar MessagePack (`POST /api/v1/write/msgpack`,
 zstd-compressed), one item per measurement per request. The collector reports
 on itself in two measurements, `internal_collector` and `internal_output`:
-records gathered, sent, dropped and rejected, retries and the last HTTP status.
+records gathered, sent, dropped and rejected, retries and the last HTTP status
+(for `mqtt`: the last CONNACK code, and `records_resent`, rows sent again).
+
+## Sending to an MQTT broker: `mqtt`
+
+The `mqtt` output publishes to any MQTT 3.1.1 broker (mosquitto, EMQX,
+HiveMQ, AWS IoT), with QoS 1 and one message in flight. It can run on its own
+or next to `arc`; each output has its own sender thread, so a broker that
+hangs never delays Arc.
+
+```yaml
+outputs:
+  - mqtt:
+      url: mqtt://broker.local:1883
+      username: rtc
+      password: ...        # or set RTC_MQTT_PASSWORD
+```
+
+Each measurement goes in its own message, on the topic
+`rtcollector/{host}/{measurement}`. The payload is an array of rows:
+
+```json
+[{"m": "cpu", "t": 1793734227123456, "tags": {"host": "pi5", "cpu": "cpu0"},
+  "fields": {"usage_percent": 3.5}}]
+```
+
+It is sent as MessagePack by default (`format: msgpack`), or as JSON.
+`{host}` is the configured host: `tags.host` if set, else `hostname`. A
+record's own `host` tag, for example one sent to `/dev/rtcollector`, stays in
+the row's tags and never changes the topic.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `url` | required | `mqtt://host` or `mqtt://host:port` (default port 1883); `mqtt://[::1]` for IPv6. `mqtts://` is not in this build yet |
+| `topic` | `rtcollector/{host}/{measurement}` | Topic template. `{measurement}` may appear once. Refused: `+`, `#`, a leading `$`, other `{placeholders}`, over 1024 bytes. Warned: empty levels, more than 8 levels or over 256 bytes (AWS IoT refuses those) |
+| `format` | `msgpack` | `msgpack` or `json`. Use `msgpack` into Arc |
+| `time_precision` | `us` | Unit of `t`: `ns`, `us`, `ms` or `s`. Arc stores microseconds; with `json`, `ns` exceeds what a JSON number holds exactly |
+| `client_id` | `rtc` + 8 hex of a hash of the host + 8 random hex | MQTT client id, new at every start. A broker disconnects a client whose id another client takes, so set it yourself only if it is unique. Over 23 bytes or other than letters and digits is warned (some brokers refuse it) |
+| `username`, `password` | none | A password needs a username. `RTC_MQTT_PASSWORD` overrides the password; `secret:` references are not supported. Without TLS the password crosses the network in clear text (warned at start) |
+| `keepalive` | `60` | Seconds; a PINGREQ goes out after half of it without traffic. `0` turns it off |
+| `timeout` | `10` | Seconds to wait for a connection, CONNACK, PUBACK or PINGRESP (1–300) |
+| `batch_bytes` | `256KiB` | Bytes of records read from the buffer per batch (default capped at half of `buffer_bytes`) |
+| `max_message_bytes` | `128KiB` | Largest PUBLISH packet (1KiB–256MiB). It must hold the largest row of the configuration: 6 × (`max_record_bytes` + the configured tags and host) + the topic; the error gives the number |
+| `status_topic` | `rtcollector/{host}` | Presence, see below. `''` turns it off |
+
+**What is counted.** The output counts in `internal_output` (`output=mqtt`):
+
+| What happened | The rows | Counter |
+|---|---|---|
+| PUBACK | sent | `records_sent` |
+| Cannot connect, CONNACK refused, write failed | kept and sent again after a backoff | `request_errors` |
+| Connection closed, or no PUBACK within `timeout`, after the whole message was written | kept and sent again: the broker may already have them | `records_resent` when they go again |
+| Shutdown (or `--once`) deadline after the whole message was written | not sent again | `records_outcome_unknown` |
+| Shutdown deadline before that | dropped | `records_dropped` |
+| A row larger than `max_message_bytes`, invalid names, a field whose type changes inside a message | dropped | `records_rejected`, `invalid_names`, `type_conflicts` |
+
+Delivery is at least once: after a lost PUBACK the rows go again, and a
+subscriber can see them twice. A PUBACK means the broker accepted the
+message, not that anyone stored it: mosquitto acknowledges and discards a
+message its ACL denies, and loses acknowledged messages on a restart unless
+`persistence` is on.
+
+**When the broker closes the connection.** MQTT has no "too large" answer: a
+broker over its packet limit (mosquitto's `max_packet_size`) closes the
+connection instead. After a close during or after a PUBLISH, the rows are
+sent again in messages of at most half that size, and the size grows back
+after 32 acknowledged messages. A single row closed three times in a row,
+each time on a new connection, is dropped (`records_rejected`) and the log
+says why: the broker's packet limit, its ACL, or another client with the same
+id.
+
+**Presence.** With `status_topic` set, the broker keeps a retained message on
+that topic: `online` once connected, `offline` after a clean stop. If the
+collector dies or loses the network, the broker publishes `offline` itself
+(the CONNECT's will). There is no presence under `--once`. The topic may not
+be one a measurement would use; by default it is one level up, so
+`rtcollector/#` sees both and `rtcollector/+/+` sees only data.
+
+**Into Arc.** Arc subscribes to the broker and decodes these rows as they are.
+Create one subscription (`POST /api/v1/mqtt/subscriptions`) with
+`"topics": ["rtcollector/+/+"]` and a database; each row's `m` becomes the
+measurement (a topic rule's `measurement` would override it). Keep
+`format: msgpack`: JSON numbers arrive in Arc as floats, so an integer field
+would change type, and a measurement should not switch formats once written.
 
 ## Licence
 

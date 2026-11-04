@@ -677,11 +677,14 @@ static int validate_mqtt(rtc_config *c)
 		bad += check_topic("outputs.mqtt.topic", t, strlen(tw));
 	if (q->status_topic[0]) {
 		char s[RTC_MQTT_TOPIC_MAX * 2];
+		int tb;
 		if (rtc_mqtt_topic_expand(q->status_topic, host, NULL, 0, s, sizeof(s)) < 0) {
 			RTC_ERROR(C, "outputs.mqtt.status_topic: only {host} may be used, within %d bytes",
 			          RTC_MQTT_TOPIC_MAX);
 			bad++;
-		} else if (!(bad += check_topic("outputs.mqtt.status_topic", s, strlen(s)))) {
+		} else if ((tb = check_topic("outputs.mqtt.status_topic", s, strlen(s))) != 0) {
+			bad += tb;
+		} else {
 			/* Must not be the data topic of any measurement. */
 			char pre[RTC_MQTT_TOPIC_MAX * 2], post[RTC_MQTT_TOPIC_MAX * 2];
 			bool clash = false;

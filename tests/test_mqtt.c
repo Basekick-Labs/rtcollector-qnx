@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define STATUS "rtcollector/pi5"
 
@@ -674,6 +675,28 @@ static int load(const char *yaml)
 	return rtc_config_load_string(&cfg, yaml, strlen(yaml));
 }
 
+/* Config errors logged while loading yaml. */
+static int count_errors(const char *yaml)
+{
+	FILE *t = tmpfile();
+	if (!t)
+		return -1;
+	fflush(stderr);
+	int saved = dup(STDERR_FILENO);
+	dup2(fileno(t), STDERR_FILENO);
+	(void)load(yaml);
+	fflush(stderr);
+	dup2(saved, STDERR_FILENO);
+	close(saved);
+	rewind(t);
+	char line[512];
+	int n = 0;
+	while (fgets(line, sizeof(line), t))
+		n += strstr(line, " error config: ") != NULL;
+	fclose(t);
+	return n;
+}
+
 static void config_validation(void)
 {
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://10.0.2.2:18830}\n") == 0);
@@ -704,6 +727,9 @@ static void config_validation(void)
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, status_topic: 's/{measurement}'}\n") !=
 	      0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, status_topic: ''}\n") == 0);
+	/* The clash is found even when another key is wrong too. */
+	CHECK(count_errors("hostname: pi5\noutputs:\n  - mqtt: {url: mqtts://b, status_topic: "
+	                   "'rtcollector/{host}/up'}\n") == 2);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, max_message_bytes: 16KiB}\n") != 0);
 	/* The floor follows the configuration: small records, a small message. */
 	CHECK(load("hostname: pi5\nmax_record_bytes: 512\noutputs:\n  - mqtt: {url: mqtt://b, "

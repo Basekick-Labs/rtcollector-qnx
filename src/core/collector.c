@@ -73,7 +73,7 @@ int rtc_collector_init(rtc_collector *c, const rtc_config *cfg)
 	atomic_init(&c->abort_after_ns, 0);
 	atomic_init(&c->stop, false);
 	atomic_init(&c->stop_collect, false);
-	atomic_init(&c->lp_drain, NULL);
+	atomic_init(&c->lp_ndrains, 0);
 
 	unsigned nout = (cfg->arc.enabled ? 1 : 0) + (cfg->out_stdout.enabled ? 1 : 0);
 	if (rtc_ring_init(&c->ring, cfg->buffer_bytes, cfg->max_record_bytes, nout) != 0) {
@@ -189,13 +189,13 @@ static void *collect_main(void *arg)
 		 * promptly; macOS has no clock_nanosleep(TIMER_ABSTIME). */
 		while (!atomic_load(&c->stop_collect)) {
 			/* Convert what /dev/rtcollector received; bounded per step. */
-			rtc_lp_drain *lpd = atomic_load(&c->lp_drain);
-			if (lpd)
-				rtc_lp_drain_step(c, lpd);
+			unsigned nd = atomic_load(&c->lp_ndrains);
+			for (unsigned d = 0; d < nd; d++)
+				rtc_lp_drain_step(c, &c->lp_drains[d]);
 			uint64_t n = rtc_mono_ns();
 			if (n >= next)
 				break;
-			uint64_t max_slice = lpd ? 20000000u : 100000000u;
+			uint64_t max_slice = nd ? 20000000u : 100000000u;
 			uint64_t slice = next - n < max_slice ? next - n : max_slice;
 			struct timespec s = {(time_t)(slice / 1000000000u), (long)(slice % 1000000000u)};
 			nanosleep(&s, NULL);
@@ -203,8 +203,9 @@ static void *collect_main(void *arg)
 	}
 	/* The resource manager has stopped (rtc_collector_stop stops it first):
 	 * convert what it received, then count anything left as dropped. */
-	rtc_lp_drain *lpd = atomic_load(&c->lp_drain);
-	if (lpd) {
+	unsigned nd = atomic_load(&c->lp_ndrains);
+	for (unsigned d = 0; d < nd; d++) {
+		rtc_lp_drain *lpd = &c->lp_drains[d];
 		for (int i = 0; i < 1024 && rtc_lp_drain_step(c, lpd) > 0; i++)
 			;
 		uint64_t left = rtc_ring_unseen(lpd->ring, 0);
@@ -410,9 +411,11 @@ void rtc_collector_stop(rtc_collector *c)
 	atomic_store(&c->stop, true);
 	pthread_join(c->send_thread, NULL);
 	rtc_collector_account_unsent(c, true);
-	if (atomic_load(&c->lp_drain)) {
+	if (atomic_load(&c->lp_ndrains)) {
 		/* The internal input no longer runs: report the device's totals here. */
-		const rtc_rmgr_counters *r = &c->rmgr_counters;
+		rtc_rmgr_counters sum;
+		rtc_rmgr_sum(c, &sum);
+		const rtc_rmgr_counters *r = &sum;
 		const rtc_collect_counters *k = &c->counters;
 		RTC_INFO("rmgr",
 		         "%s totals: writes=%llu lines=%llu malformed=%llu bad_timestamp=%llu too_large=%llu "
@@ -425,6 +428,22 @@ void rtc_collector_stop(rtc_collector *c)
 		         (unsigned long long)(rtc_counter_get(&r->dropped) +
 		                              rtc_counter_get(&k->rmgr_drain_dropped)),
 		         (unsigned long long)rtc_counter_get(&r->oversize));
+	}
+}
+
+void rtc_rmgr_sum(const rtc_collector *c, rtc_rmgr_counters *out)
+{
+	memset(out, 0, sizeof(*out));
+	for (unsigned i = 0; i < c->rmgr_nthreads && i < RTC_RMGR_MAX_THREADS; i++) {
+		const rtc_rmgr_counters *k = &c->rmgr_counters[i];
+		rtc_counter_add(&out->writes, rtc_counter_get(&k->writes));
+		rtc_counter_add(&out->bytes, rtc_counter_get(&k->bytes));
+		rtc_counter_add(&out->dropped, rtc_counter_get(&k->dropped));
+		rtc_counter_add(&out->oversize, rtc_counter_get(&k->oversize));
+		rtc_counter_add(&out->errors, rtc_counter_get(&k->errors));
+		rtc_counter_add(&out->msgreads, rtc_counter_get(&k->msgreads));
+		if (rtc_counter_get(&k->max_prio_seen) > rtc_counter_get(&out->max_prio_seen))
+			rtc_counter_set(&out->max_prio_seen, rtc_counter_get(&k->max_prio_seen));
 	}
 }
 

@@ -40,8 +40,10 @@ static int gather(rtc_collector *c)
 	rtc_rb_i64(&b, "buffer_bytes", clamp(c->ring.cap));
 	rtc_emit(c, &b);
 
-	if (atomic_load(&c->lp_drain)) { /* /dev/rtcollector is running */
-		const rtc_rmgr_counters *r = &c->rmgr_counters;
+	if (atomic_load(&c->lp_ndrains)) { /* /dev/rtcollector is running */
+		rtc_rmgr_counters sum;
+		rtc_rmgr_sum(c, &sum);
+		const rtc_rmgr_counters *r = &sum;
 		rtc_rb_init(&b, c->scratch, c->cfg.max_record_bytes, "internal_rmgr");
 		F(&b, "writes", &r->writes);
 		F(&b, "bytes", &r->bytes);

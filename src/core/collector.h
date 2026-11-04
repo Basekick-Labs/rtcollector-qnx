@@ -14,6 +14,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define RTC_RMGR_MAX_THREADS 16
+
 typedef struct rtc_collector rtc_collector;
 typedef struct rtc_output rtc_output;
 
@@ -70,10 +72,13 @@ struct rtc_collector {
 	rtc_config cfg;
 	rtc_ring ring;
 	rtc_collect_counters counters;
-	rtc_rmgr_counters rmgr_counters;
+	/* /dev/rtcollector: one counter set per handler thread (single writer each). */
+	rtc_rmgr_counters rmgr_counters[RTC_RMGR_MAX_THREADS];
+	unsigned rmgr_nthreads;
 	/* Set by the rmgr input: raw writes the collection thread converts. */
-	_Atomic(rtc_lp_drain *) lp_drain;
-	uint8_t *scratch; /* max_record_bytes, collection thread only */
+	rtc_lp_drain *lp_drains;     /* one per rmgr handler thread */
+	_Atomic unsigned lp_ndrains; /* published after lp_drains is set; 0 = rmgr not running */
+	uint8_t *scratch;            /* max_record_bytes, collection thread only */
 
 	const rtc_input_def *inputs[RTC_CFG_MAX_INPUTS];
 	unsigned ninputs;
@@ -117,6 +122,9 @@ const char *rtc_hostname(const rtc_collector *c);
 /* Shared by outputs. */
 int rtc_output_alloc_batch(rtc_output *o, size_t batch_bytes, uint32_t max_record);
 void rtc_output_free_batch(rtc_output *o);
+
+/* Sum of the per-thread /dev/rtcollector counters (max for max_prio_seen). */
+void rtc_rmgr_sum(const rtc_collector *c, rtc_rmgr_counters *out);
 
 /* Built-in inputs and outputs. */
 extern const rtc_input_def rtc_input_internal;

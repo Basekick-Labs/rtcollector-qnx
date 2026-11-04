@@ -85,25 +85,37 @@ fragments are counted as malformed.
 What a write costs and what it promises:
 
 - The handler copies the bytes into a preallocated buffer and replies. It
-  runs at the writer's priority (QNX priority inheritance), so a real-time
-  writer is never delayed by lower-priority work. Measured on QEMU/KVM: a
-  priority-50 writer with a priority-30 CPU hog and a flooding priority-5
-  writer on the same core: p99 9 µs, max 12 µs.
-- A write waits for the handler in progress plus one handler run per queued
-  writer at equal or higher priority, while the collector runs. If the
-  collector is stopped (SIGSTOP), writes block; after it exits, they fail
-  with `EBADF` (reopen the device).
+  runs on a small pool of threads (`rmgr_threads`, default 4) at a fixed
+  priority (`rmgr_priority`, default 63): set it above every thread that
+  writes. Measured on QEMU/KVM, all on one core: a priority-50 writer while a
+  priority-5 writer floods and a priority-30 CPU hog runs: p99 about 10 µs,
+  worst 43 µs over 5 runs. (The Raspberry Pi measurement comes with the
+  jitter harness.)
+- Why a pool and a fixed priority, both learned on QNX 8: with priority
+  inheritance, a low-priority writer's handler ran at that writer's priority
+  and anything in between preempted it; and a low-priority writer preempted
+  in the middle of its send keeps the server thread it was being delivered
+  to. With one thread, a priority-50 writer waited 20–47 ms behind them.
+- While the collector runs, a write waits at most for one handler run per
+  writer ahead of it, unless more than `rmgr_threads` lower-priority writers
+  are preempted mid-send at the same moment. If the collector is stopped
+  (SIGSTOP), writes block. When it shuts down, writes fail at once with
+  `EBADF` (reopen the device after it restarts).
 - Writes longer than `max_write_bytes` fail with `EMSGSIZE`. Anything else
-  succeeds: data lost because the buffer is full is counted, never reported
-  to the writer.
+  succeeds: data lost because a buffer is full is counted, never reported to
+  the writer.
+- Open the device once and keep it open: opens and closes go through the
+  same threads and allocate.
 - Lines are parsed on the collection thread, not in `write()`. Fields:
   float, `123i` integer, `123u` unsigned (dropped if above 2^63−1), booleans
-  (`t`, `true`, `True`, `TRUE`, `f`, …), `"strings"`. An explicit timestamp
-  must be in nanoseconds (others are refused and counted); without one, the
-  receive time is used. A tag `host` replaces the collector's host tag.
+  (`t`, `true`, `True`, `TRUE`, `f`, …), `"strings"`. No leading `+`, no NUL
+  bytes. An explicit timestamp must be in nanoseconds (others are refused and
+  counted); without one, the receive time is used. A tag `host` replaces the
+  collector's host tag. A line whose converted record exceeds
+  `max_record_bytes` is counted as `too_large`.
 - `cat /dev/rtcollector` prints one status line: writes, bytes, dropped,
-  oversize, lines, malformed, bad timestamps and the highest writer priority
-  seen.
+  oversize, lines, malformed, bad timestamps, too large, the highest writer
+  priority seen, and the handler priority and thread count.
 
 Registering a path needs root (or `PROCMGR_AID_PATHSPACE`); without it the
 collector runs without `/dev/rtcollector` and `rmgr_unavailable` is 1. A
@@ -149,7 +161,9 @@ outputs:
 | `rmgr_path` | `/dev/rtcollector` | Path of the device (input `rmgr`) |
 | `rmgr_mode` | `0660` | Its permissions, octal. `0666` lets any user publish (and flood) |
 | `rmgr_group` | `0` | Its group id |
-| `rmgr_buffer_bytes` | `256KiB` | Buffer between the device and the collection thread |
+| `rmgr_buffer_bytes` | `256KiB` | Buffer between the device and the collection thread, split among `rmgr_threads` |
+| `rmgr_threads` | `4` | Handler threads for the device (1–16) |
+| `rmgr_priority` | `63` | Fixed priority of the device's handler threads: above every writer |
 | `max_write_bytes` | `4096` | Largest write accepted |
 | `rmgr_drain_bytes` | `64KiB` | Bytes converted per collection-thread step (every 20 ms at most) |
 | `debug` | `false` | Verbose logging (same as `-d`) |

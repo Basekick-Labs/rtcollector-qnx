@@ -30,6 +30,7 @@ void rtc_config_defaults(rtc_config *c)
 	c->rmgr_mode = 0660;
 	c->rmgr_group = 0;
 	c->rmgr_priority = 63;
+	c->rmgr_threads = 4;
 	c->rmgr_buffer_bytes = 256u << 10;
 	c->max_write_bytes = 4096;
 	c->rmgr_drain_bytes = 64u << 10;
@@ -277,6 +278,13 @@ static void load_doc(ctx *x, rtc_config *c)
 				err(x, "rmgr_priority", "must be an integer from 1 to 253");
 			else
 				c->rmgr_priority = (int)t;
+		} else if (!strcmp(k, "rmgr_threads")) {
+			double t = 0;
+			get_num(x, v, "rmgr_threads", &t);
+			if (t < 1 || t > 16 || t != floor(t))
+				err(x, "rmgr_threads", "must be an integer from 1 to 16");
+			else
+				c->rmgr_threads = (unsigned)t;
 		} else if (!strcmp(k, "rmgr_group")) {
 			double t = -1;
 			get_num(x, v, "rmgr_group", &t);
@@ -475,8 +483,10 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "max_write_bytes: must be from 64 to 64KiB");
 		bad++;
 	}
-	if (c->rmgr_buffer_bytes < RTC_RING_HDR + c->max_write_bytes + 1) {
-		RTC_ERROR(C, "rmgr_buffer_bytes: must hold at least one write of max_write_bytes");
+	if (c->rmgr_threads == 0 ||
+	    c->rmgr_buffer_bytes / c->rmgr_threads < RTC_RING_HDR + c->max_write_bytes + 1) {
+		RTC_ERROR(C, "rmgr_buffer_bytes: each of the rmgr_threads buffers must hold one write of "
+		             "max_write_bytes");
 		bad++;
 	}
 	if (c->rmgr_drain_bytes < c->max_write_bytes + 1 || c->rmgr_drain_bytes > (16u << 20)) {

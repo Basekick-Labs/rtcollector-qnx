@@ -26,7 +26,8 @@ static void setup(size_t lp_ring_bytes)
 	CHECK(rtc_collector_init(&C, &cfg) == 0);
 	CHECK(rtc_ring_init(&LPR, lp_ring_bytes, 4097, 1) == 0);
 	CHECK(rtc_lp_drain_init(&D, &LPR, 4096, 64u << 10) == 0);
-	C.lp_drain = &D;
+	C.lp_drains = &D;
+	atomic_store(&C.lp_ndrains, 1);
 }
 
 static void teardown(void)

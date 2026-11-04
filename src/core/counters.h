@@ -60,7 +60,7 @@ typedef struct {
 	rtc_counter rmgr_unavailable; /* 1: /dev/rtcollector could not be registered */
 } rtc_collect_counters;
 
-/* Written by the resource manager thread (/dev/rtcollector). */
+/* Written by one resource manager thread (/dev/rtcollector); one set per thread. */
 typedef struct {
 	rtc_counter writes;
 	rtc_counter bytes;

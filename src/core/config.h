@@ -17,7 +17,8 @@
  *   max_processes: 4096     a scan stops here (overflow counted)
  *   rmgr_path: /dev/rtcollector   rmgr input: where programs write line protocol
  *   rmgr_mode: 0660         its permissions (octal); rmgr_group: 0 its group
- *   rmgr_priority: 63       its handler's fixed priority: above every writer
+ *   rmgr_priority: 63       its handlers' fixed priority: above every writer
+ *   rmgr_threads: 4         handler threads; rmgr_buffer_bytes is split among them
  *   rmgr_buffer_bytes: 256KiB, max_write_bytes: 4096, rmgr_drain_bytes: 64KiB
  *   inputs: [internal, ...] a name, or {name: {config}}
  *   outputs:
@@ -66,9 +67,10 @@ typedef struct {
 	unsigned processes_every; /* rounds between process scans */
 	/* /dev/rtcollector (input rmgr, QNX) */
 	char rmgr_path[256];
-	unsigned rmgr_mode; /* permission bits, octal in YAML */
-	int rmgr_group;     /* gid owning the device */
-	int rmgr_priority;  /* fixed priority of the device's handler thread */
+	unsigned rmgr_mode;    /* permission bits, octal in YAML */
+	int rmgr_group;        /* gid owning the device */
+	int rmgr_priority;     /* fixed priority of the device's handler threads */
+	unsigned rmgr_threads; /* handler threads (each with its own buffer) */
 	size_t rmgr_buffer_bytes;
 	size_t max_write_bytes;
 	size_t rmgr_drain_bytes;

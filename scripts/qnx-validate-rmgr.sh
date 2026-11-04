@@ -11,7 +11,7 @@ for f in rtcollector rtc_writer rtc_hog; do [ -x "$B/$f" ] || { echo "no $B/$f: 
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 printf 'interval: 1\nflush_interval: 1\nrmgr_mode: 0666\ninputs: [rmgr]\noutputs:\n  - stdout: {}\n' >"$B/rmgr.yml"
-printf 'interval: 1\nflush_interval: 1\nshutdown_timeout: 5\nrmgr_mode: 0666\nrmgr_buffer_bytes: 8KiB\ninputs: [rmgr]\noutputs:\n  - arc: {url: "http://10.0.2.2:9", timeout: 2}\n' >"$B/rmgr-down.yml"
+printf 'interval: 1\nflush_interval: 1\nshutdown_timeout: 5\nrmgr_mode: 0666\nrmgr_buffer_bytes: 64KiB\ninputs: [rmgr]\noutputs:\n  - arc: {url: "http://10.0.2.2:9", timeout: 2}\n' >"$B/rmgr-down.yml"
 printf 'interval: 1\nflush_interval: 1\nrmgr_path: /dev/rtc-nonroot\ninputs: [rmgr]\noutputs:\n  - stdout: {}\n' >"$B/rmgr-nr.yml"
 (cd "$B" && exec python3 -m http.server "$PORT" --bind 127.0.0.1) >/tmp/rtc-validate-http.log 2>&1 &
 HTTP=$!

@@ -1,14 +1,22 @@
 /* Test client for /dev/rtcollector (QNX). Writes N lines in one of several
  * client idioms and reports write() latency.
  *
- *   rtc_writer [-p path] [-n lines] [-m publish|snprintf|dprintf|pwrite|zero|big] [-s measurement]
- *              [-u sleep_us] [-t] [-T explicit_ts_ns]
+ *   rtc_writer [-p path] [-n lines] [-m publish|snprintf|dprintf|pwrite|zero|big|max] [-s measurement]
+ *              [-u sleep_us] [-t] [-T explicit_ts_ns] [-P prio] [-c cpu]
+ *
+ * -m max writes valid lines of max_write_bytes (4096) each: the largest copy
+ * the device does. -P runs SCHED_FIFO at prio, -c pins to one CPU.
  *
  * -t prints p50/p99/max write latency in microseconds. Exit status: 0 if
  * every write succeeded. */
 #include "../../include/rtc_publish.h"
 
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
+#ifdef __QNX__
+#include <sys/neutrino.h>
+#endif
 #ifdef __QNX__
 #include <unix.h>
 #endif
@@ -36,6 +44,7 @@ int main(int argc, char **argv)
 	long n = 10, sleep_us = 0;
 	int timing = 0;
 	unsigned long long ts = 0;
+	int prio = 0, cpu = -1;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-p") && i + 1 < argc)
 			path = argv[++i];
@@ -51,6 +60,23 @@ int main(int argc, char **argv)
 			ts = strtoull(argv[++i], NULL, 10);
 		else if (!strcmp(argv[i], "-t"))
 			timing = 1;
+		else if (!strcmp(argv[i], "-P") && i + 1 < argc)
+			prio = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-c") && i + 1 < argc)
+			cpu = atoi(argv[++i]);
+	}
+#ifdef __QNX__
+	if (cpu >= 0 && ThreadCtl(_NTO_TCTL_RUNMASK, (void *)(uintptr_t)(1u << cpu)) == -1) {
+		perror("rtc_writer: runmask");
+		return 2;
+	}
+#endif
+	if (prio > 0) {
+		struct sched_param sp = {.sched_priority = prio};
+		if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
+			fprintf(stderr, "rtc_writer: cannot run at priority %d\n", prio);
+			return 2;
+		}
 	}
 	int fd = open(path, O_WRONLY);
 	if (fd < 0) {
@@ -82,6 +108,13 @@ int main(int argc, char **argv)
 			rc = (int)write(fd, line, sizeof(line));
 			if (rc < 0)
 				printf("errno=%d %s\n", errno, strerror(errno));
+		} else if (!strcmp(mode, "max")) {
+			static char line[4096];
+			int len = snprintf(line, sizeof(line), "%s,mode=max seq=%ldi,pad=\"", m, i);
+			memset(line + len, 'x', sizeof(line) - (size_t)len - 2);
+			line[sizeof(line) - 2] = '"';
+			line[sizeof(line) - 1] = '\n';
+			rc = (int)write(fd, line, sizeof(line));
 		} else if (!strcmp(mode, "dprintf")) {
 			rc = dprintf(fd, "%s,mode=dprintf seq=%ldi\n", m, i);
 		} else if (!strcmp(mode, "snprintf")) {

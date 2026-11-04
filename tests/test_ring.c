@@ -286,6 +286,7 @@ static void stress_every_record_delivered_once_or_counted(void)
 			break;
 	}
 	pthread_join(t, NULL);
+	gaps += rtc_ring_unseen(&r, 0); /* evicted by the last pushes, no later record */
 	CHECK_EQ_U(bad, 0);
 	CHECK_EQ_U(order, 0);
 	CHECK_EQ_U(delivered + gaps + p.dropped_newest, STRESS_N);
@@ -474,6 +475,8 @@ static void *reader(void *arg)
 		if (fin && n == 0 && rtc_ring_pending(x->r, x->o) == 0)
 			break;
 	}
+	/* Evicted by the last pushes with no later record to show the gap. */
+	x->gaps += rtc_ring_unseen(x->r, x->o);
 	free(dst);
 	return NULL;
 }

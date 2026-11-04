@@ -7,7 +7,7 @@
  *
  * Ownership:
  *   producer: head, tail, next_seq, the bytes it writes
- *   output o: cursor[o], next_seq_expected[o], claim[o]
+ *   output o: cursor[o], expect_seq[o], claim[o]
  *
  * The producer never waits. When it needs space it advances tail past the
  * oldest records (eviction). Before it overwrites any byte it checks every

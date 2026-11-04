@@ -2,7 +2,9 @@
  *
  * Every counter has exactly one writing thread, so an increment is a relaxed
  * load and store, never a read-modify-write: no LL/SC loop on aarch64, no
- * lock, bounded on every path. Other threads only read.
+ * lock, bounded on every path. Other threads only read. One exception:
+ * priority_fallback, written by whichever thread starts a thread (the main
+ * thread, the trace monitor), with an atomic add.
  */
 #ifndef RTC_COUNTERS_H
 #define RTC_COUNTERS_H
@@ -73,7 +75,7 @@ typedef struct {
 	rtc_counter max_prio_seen; /* highest writer priority seen */
 } rtc_rmgr_counters;
 
-/* Written by the sender thread, one set per output. */
+/* Written by that output's sender thread, one set per output. */
 typedef struct {
 	rtc_counter records_sent;
 	rtc_counter records_dropped;        /* evicted from the ring before this output read them */

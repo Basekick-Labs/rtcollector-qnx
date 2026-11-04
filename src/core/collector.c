@@ -107,9 +107,17 @@ int rtc_collector_init(rtc_collector *c, const rtc_config *cfg)
 			return -1;
 		c->noutputs++;
 	}
+	/* The ring respects the claims of its first noutputs readers only: an
+	 * output it was not sized for would copy bytes the producer overwrites. */
+	if (c->noutputs != c->ring.noutputs) {
+		RTC_ERROR(C, "%u outputs but a ring for %u", c->noutputs, c->ring.noutputs);
+		return -1;
+	}
 	uint64_t now = rtc_mono_ns();
-	for (unsigned i = 0; i < c->noutputs; i++)
+	for (unsigned i = 0; i < c->noutputs; i++) {
+		c->outputs[i]->collector = c;
 		c->outputs[i]->last_flush_ns = now;
+	}
 	return 0;
 }
 
@@ -334,12 +342,19 @@ static void *send_main(void *arg)
 		struct timespec s = {0, 20000000};
 		nanosleep(&s, NULL);
 	}
+	if (c->sender_exit_delay_ns) {
+		struct timespec s = {(time_t)(c->sender_exit_delay_ns / 1000000000u),
+		                     (long)(c->sender_exit_delay_ns % 1000000000u)};
+		nanosleep(&s, NULL);
+	}
+	atomic_store(&o->sender_done, true);
 	return NULL;
 }
 
 /* Stops and joins every sender started so far. Untimed on purpose: an output
  * is freed after this, so no sender may still be running. The bound comes
- * from every blocking call honouring abort_after_ns. */
+ * from every blocking call of an output honouring abort_after_ns (Arc's
+ * requests, stdout's writes). */
 static void join_senders(rtc_collector *c)
 {
 	atomic_store(&c->stop, true);
@@ -351,11 +366,14 @@ static void join_senders(rtc_collector *c)
 /* Starts a thread at a fixed SCHED_RR priority set at creation, so it never
  * runs at the inherited one. On QNX a non-root user may not go above 63
  * (PROCMGR_AID_PRIORITY): then it starts with the inherited priority, once
- * logged and counted. Elsewhere the priority keys are ignored. */
-int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
-                     const char *what)
+ * logged and counted. Elsewhere the priority keys are ignored. Called from
+ * the main thread and from the trace monitor thread. */
+int rtc_start_thread_at(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
+                        const char *what, bool *fell_back)
 {
-	if (c->fail_thread_at && ++c->threads_started == c->fail_thread_at)
+	if (fell_back)
+		*fell_back = false;
+	if (c->fail_thread_at && atomic_fetch_add(&c->threads_started, 1) + 1 == c->fail_thread_at)
 		return EAGAIN;
 #ifdef RTC_QNX
 	pthread_attr_t a;
@@ -375,20 +393,31 @@ int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *
 	}
 	RTC_WARN(C, "cannot run the %s thread at priority %d (%s); using the inherited priority", what, prio,
 	         strerror(rc));
-	rtc_counter_add(&c->counters.priority_fallback, 1);
+	/* The one counter with two writers (main and trace monitor threads). */
+	atomic_fetch_add_explicit(&c->counters.priority_fallback.v, 1, memory_order_relaxed);
+	if (fell_back)
+		*fell_back = true;
 #else
-	(void)c;
 	(void)prio;
 	(void)what;
 #endif
 	return pthread_create(t, NULL, fn, arg);
 }
 
+int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
+                     const char *what)
+{
+	return rtc_start_thread_at(c, t, fn, arg, prio, what, NULL);
+}
+
 int rtc_collector_start(rtc_collector *c)
 {
 	for (unsigned i = 0; i < c->noutputs; i++) {
+		char what[48];
+		snprintf(what, sizeof(what), "%s sender", c->outputs[i]->name);
+		atomic_store(&c->outputs[i]->sender_done, false);
 		int rc = rtc_start_thread(c, &c->send_threads[i], send_main, c->outputs[i],
-		                          c->cfg.send_priority, "sender");
+		                          c->cfg.send_priority, what);
 		if (rc != 0) {
 			RTC_ERROR(C, "cannot start the %s sender thread: %s", c->outputs[i]->name,
 			          strerror(rc));

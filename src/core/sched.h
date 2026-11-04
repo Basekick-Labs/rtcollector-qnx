@@ -70,7 +70,7 @@ typedef struct {
 
 typedef struct {
 	rtc_sched_thread *threads;
-	size_t max_threads, nthreads;
+	size_t max_threads, nthreads; /* max_threads: table slots, one more than the capacity */
 	rtc_sched_proc *procs;
 	size_t max_procs, nprocs;
 	uint64_t cpu_switches[RTC_SCHED_MAX_CPUS];

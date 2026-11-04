@@ -141,7 +141,8 @@ static void table_churn_and_overflow(void)
 	/* Without DEAD: overflow is counted, nothing breaks. */
 	for (uint32_t i = 1; i <= 20; i++)
 		ev(0, 5, 400, i, RTC_EV_READY, 10);
-	CHECK(S.threads_overflow > 0);
+	CHECK_EQ_U(S.nthreads, 8); /* exactly the configured capacity */
+	CHECK_EQ_U(S.threads_overflow, 12);
 	rtc_sched_free(&S);
 }
 

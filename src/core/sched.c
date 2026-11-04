@@ -55,12 +55,14 @@ uint64_t rtc_hist_quantile(const rtc_hist *h, double q)
 int rtc_sched_init(rtc_sched *s, size_t max_threads)
 {
 	memset(s, 0, sizeof(*s));
-	s->threads = calloc(max_threads, sizeof(*s->threads));
+	/* One slot more than the threads it holds: find() keeps one empty so a
+	 * miss ends its probe early, and max_threads stays the real capacity. */
+	s->threads = calloc(max_threads + 1, sizeof(*s->threads));
 	s->max_procs = max_threads;
 	s->procs = calloc(s->max_procs, sizeof(*s->procs));
 	if (!s->threads || !s->procs)
 		return -1;
-	s->max_threads = max_threads;
+	s->max_threads = max_threads + 1; /* table slots */
 	return 0;
 }
 

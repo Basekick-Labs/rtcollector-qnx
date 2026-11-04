@@ -19,10 +19,11 @@ SUITE(cpumath)
 SUITE(lp)
 SUITE(lpdrain)
 SUITE(sched)
+SUITE(stdout)
 
 static const t_case *suites[] = {record_cases,     msgpack_cases,  ring_cases,      config_cases,
                                  arc_encode_cases, arc_http_cases, lifecycle_cases, cpumath_cases,
-                                 lp_cases,         lpdrain_cases,  sched_cases};
+                                 lp_cases,         lpdrain_cases,  sched_cases,     stdout_cases};
 
 int main(int argc, char **argv)
 {

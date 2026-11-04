@@ -121,6 +121,36 @@ static void configured_tags_win_and_record_host_beats_hostname(void)
 	mp_free_all();
 }
 
+/* A configured host tag beats both the record's host tag and the hostname. */
+static void configured_host_beats_record_host(void)
+{
+	batch b = {0};
+	rtc_config cfg;
+	rtc_config_defaults(&cfg);
+	cfg.ntags = 1;
+	strcpy(cfg.tags[0].key, "host");
+	strcpy(cfg.tags[0].val, "cell-3");
+	rtc_output_counters k = {0};
+
+	rtc_rec_builder *r = begin(&b, "app");
+	rtc_rb_tag(r, "host", "robot-7");
+	rtc_rb_i64(r, "x", 1);
+	end(&b, r, 1793734227000000000ull);
+	r = begin(&b, "app");
+	rtc_rb_i64(r, "x", 2);
+	end(&b, r, 1793734228000000000ull);
+
+	mp_node *root = encode(&b, &cfg, &k, NULL);
+	mp_node *cols = mp_get(item_for(root, "app"), "columns");
+	mp_node *host = mp_get(cols, "host");
+	CHECK(host && host->n == 2 && mp_str_is(host->kids[0], "cell-3") &&
+	      mp_str_is(host->kids[1], "cell-3"));
+	CHECK_EQ_U(cols->n, 3); /* time host x: one host column */
+	mp_node *tk = mp_get(item_for(root, "app"), "tag_keys");
+	CHECK(tk && tk->n == 1);
+	mp_free_all();
+}
+
 static void invalid_rows_are_rejected_not_sent(void)
 {
 	batch b = {0};
@@ -217,6 +247,7 @@ const t_case arc_encode_cases[] = {
     {"arc_encode", "one_item_per_measurement_with_null_fill", one_item_per_measurement_with_null_fill},
     {"arc_encode", "configured_tags_win_and_record_host_beats_hostname",
      configured_tags_win_and_record_host_beats_hostname},
+    {"arc_encode", "configured_host_beats_record_host", configured_host_beats_record_host},
     {"arc_encode", "invalid_rows_are_rejected_not_sent", invalid_rows_are_rejected_not_sent},
     {"arc_encode", "nothing_to_send_and_overflow", nothing_to_send_and_overflow},
     {"arc_encode", "utf8", utf8},

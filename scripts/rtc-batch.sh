@@ -56,7 +56,8 @@ ITERS=$(sed -n 's/.* work_iters=\([0-9]*\).*/\1/p' "$DIR/calibration")
 # The host's status check (one ssh login) happens now, not inside a run.
 sleep 15
 
-stray() { pidin -F '%N' 2>/dev/null | grep -cE '^(rtcollector|rtc_hog|rtc_writer)$'; }
+# pidin pads names with spaces.
+stray() { pidin -F '%N' 2>/dev/null | grep -cE '^(rtcollector|rtc_hog|rtc_writer) *$'; }
 
 n=0
 for s in "$@"; do
@@ -110,7 +111,7 @@ for s in "$@"; do
 		sleep 3 # past startup: measured on its own, not inside a run
 		# A collector that did not start (an input it cannot run) would turn
 		# the scenario into an idle baseline: record it, the report voids it.
-		if kill -0 "$cp" 2>/dev/null && pidin -F '%N' 2>/dev/null | grep -q '^rtcollector$'; then
+		if kill -0 "$cp" 2>/dev/null && pidin -F '%N' 2>/dev/null | grep -q '^rtcollector *$'; then
 			echo "collector_started=1" >>"$R/env"
 		else
 			echo "collector_started=0" >>"$R/env"
@@ -125,9 +126,9 @@ for s in "$@"; do
 	echo "rc=$?" >>"$R/summary"
 	# Still running at the end? (the flood writer and the collector)
 	alive=1
-	[ -n "$cp" ] && { pidin -F '%N' 2>/dev/null | grep -q '^rtcollector$' || alive=0; }
+	[ -n "$cp" ] && { pidin -F '%N' 2>/dev/null | grep -q '^rtcollector *$' || alive=0; }
 	echo "collector=$([ -n "$cp" ] && echo "$alive" || echo none) rate=$rate" >>"$R/summary"
-	case $s in S4 | S4o) pidin -F '%N' 2>/dev/null | grep -q '^rtc_writer$' && echo flood=1 >>"$R/summary" ||
+	case $s in S4 | S4o) pidin -F '%N' 2>/dev/null | grep -q '^rtc_writer *$' && echo flood=1 >>"$R/summary" ||
 		echo flood=0 >>"$R/summary" ;;
 	esac
 	for p in $pids; do kill "$p" 2>/dev/null; done

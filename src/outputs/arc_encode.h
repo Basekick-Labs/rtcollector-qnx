@@ -22,11 +22,10 @@
 #include "../core/counters.h"
 #include "../core/record.h"
 #include "../core/ring.h"
+#include "row.h"
 
 #include <stddef.h>
 #include <stdint.h>
-
-#define RTC_ARC_MAX_COLS 128
 
 enum { RTC_V_SKIP = 0, RTC_V_SENT = 1, RTC_V_REJECTED = 2 };
 
@@ -34,16 +33,9 @@ enum { RTC_V_SKIP = 0, RTC_V_SENT = 1, RTC_V_REJECTED = 2 };
 #define RTC_ARC_FLAG_SEEN 0x01
 
 typedef struct {
-	rtc_str name;
-	uint8_t is_tag;
-	uint8_t type;
-} rtc_arc_col;
-
-typedef struct {
 	rtc_str m;
-	uint16_t ncols;
 	uint32_t nrows;
-	rtc_arc_col cols[RTC_ARC_MAX_COLS];
+	rtc_row_cols s; /* validated by rtc_row_admit */
 } rtc_arc_group;
 
 typedef struct {
@@ -69,7 +61,5 @@ size_t rtc_arc_encode(rtc_arc_enc *e, const rtc_config *cfg, const char *hostnam
 
 /* Measurement name of the group a record was encoded into, or NULL. */
 const rtc_str *rtc_arc_record_measurement(const rtc_arc_enc *e, size_t rec);
-
-bool rtc_utf8_valid(const char *s, size_t n);
 
 #endif

@@ -82,6 +82,7 @@ typedef struct {
 	rtc_counter records_rejected;       /* refused by the destination or pre-validation */
 	rtc_counter points_dropped_partial; /* Arc "partial write: N points dropped" */
 	rtc_counter records_outcome_unknown;
+	rtc_counter records_resent; /* sent again after no acknowledgement (MQTT): may be duplicates */
 	rtc_counter requests;
 	rtc_counter request_errors;
 	rtc_counter retries;

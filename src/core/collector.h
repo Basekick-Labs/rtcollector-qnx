@@ -64,6 +64,13 @@ struct rtc_output {
 	void (*batch_begin)(rtc_output *o);
 	/* deadline_ns: CLOCK_MONOTONIC time by which a request must end, 0 for none. */
 	enum rtc_send_outcome (*send)(rtc_output *o, uint64_t deadline_ns);
+	/* Optional, on the sender thread: called when there is nothing to send
+	 * (keepalive). Must not block. */
+	void (*idle)(rtc_output *o, uint64_t now_ns);
+	/* Optional, on the sender thread after its final flush (never under
+	 * --once): say goodbye within deadline_ns (MQTT: retained offline,
+	 * DISCONNECT). */
+	void (*finish)(rtc_output *o, uint64_t deadline_ns);
 	void (*destroy)(rtc_output *o);
 	void *impl;
 	rtc_collector *collector;
@@ -156,6 +163,7 @@ extern const rtc_input_def rtc_input_trace;
 const rtc_input_def *rtc_input_find(const char *name);
 int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out);
 int rtc_output_stdout_create(rtc_collector *c, unsigned idx, rtc_output **out);
+int rtc_output_mqtt_create(rtc_collector *c, unsigned idx, rtc_output **out);
 
 /* Sender for --once and tests: one pass over every output, on the calling
  * thread. With threads, each output runs on its own sender instead.

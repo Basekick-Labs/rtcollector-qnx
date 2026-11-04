@@ -1,8 +1,10 @@
 /* stdout: one line per record in line-protocol form, for debugging and for
  * --once smoke tests. Tags from the configuration are added the same way the
- * Arc output adds them. */
+ * Arc output adds them (row.h). Lines are not validated: stdout prints what
+ * it can decode. */
 #include "../core/collector.h"
 #include "../core/log.h"
+#include "row.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -65,34 +67,18 @@ static bool print_rec(rtc_collector *c, const rtc_ring_rec *r, line_buf *f)
 	if (!rtc_rec_decode(r->payload, r->len, &v))
 		return false;
 	esc(f, v.measurement.p, v.measurement.len, ", ");
-	const char *host = c->cfg.hostname;
-	size_t hl = strlen(host);
-	for (unsigned i = 0; i < v.ntags; i++)
-		if (v.tag_k[i].len == 4 && !memcmp(v.tag_k[i].p, "host", 4)) {
-			host = v.tag_v[i].p;
-			hl = v.tag_v[i].len;
-		}
-	for (unsigned i = 0; i < c->cfg.ntags; i++)
-		if (!strcmp(c->cfg.tags[i].key, "host")) {
-			host = c->cfg.tags[i].val;
-			hl = strlen(host);
-		}
-	ob_puts(f, ",host=");
-	esc(f, host, hl, ",= ");
-	for (unsigned i = 0; i < c->cfg.ntags; i++) {
-		if (!strcmp(c->cfg.tags[i].key, "host"))
-			continue;
+	rtc_row_inj in[RTC_CFG_MAX_TAGS + 1];
+	unsigned nin = rtc_row_injected(&c->cfg, in);
+	for (unsigned t = 0; t < nin; t++) {
+		size_t vl;
+		const char *val = rtc_row_inj_value(&in[t], &v, c->cfg.hostname, &vl);
 		ob_putc(f, ',');
-		esc(f, c->cfg.tags[i].key, strlen(c->cfg.tags[i].key), ",= ");
+		esc(f, in[t].k, in[t].kl, ",= ");
 		ob_putc(f, '=');
-		esc(f, c->cfg.tags[i].val, strlen(c->cfg.tags[i].val), ",= ");
+		esc(f, val, vl, ",= ");
 	}
 	for (unsigned i = 0; i < v.ntags; i++) {
-		bool skip = v.tag_k[i].len == 4 && !memcmp(v.tag_k[i].p, "host", 4);
-		for (unsigned j = 0; j < c->cfg.ntags && !skip; j++)
-			skip = strlen(c->cfg.tags[j].key) == v.tag_k[i].len &&
-			       !memcmp(c->cfg.tags[j].key, v.tag_k[i].p, v.tag_k[i].len);
-		if (skip)
+		if (rtc_row_is_injected(in, nin, v.tag_k[i]))
 			continue;
 		ob_putc(f, ',');
 		esc(f, v.tag_k[i].p, v.tag_k[i].len, ",= ");

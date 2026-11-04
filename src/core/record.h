@@ -76,6 +76,9 @@ void rtc_rb_str(rtc_rec_builder *b, const char *k, const char *v);
  * (no fields, too many tags or fields, a string longer than 65535). */
 size_t rtc_rb_finish(rtc_rec_builder *b);
 
+/* Strict UTF-8: no overlongs, surrogates or code points past U+10FFFF. */
+bool rtc_utf8_valid(const char *s, size_t n);
+
 /* Decode a payload. Returns false on any malformed or out-of-bounds length.
  * The view points into buf. */
 bool rtc_rec_decode(const uint8_t *buf, size_t len, rtc_rec_view *out);

@@ -36,13 +36,13 @@ DEPFLAGS = -MMD -MP
 ifeq ($(PLATFORM),qnx)
   DEPFLAGS = -Wp,-MMD,$(@:.o=.d),-MT,$@,-MP
   # SDP 8.0 ships libcurl (shared, on the image) and libzstd (static here: the
-  # mkqnximage image has no libzstd.so). libyaml is vendored. pthreads are in
-  # libc on QNX: no -lpthread.
+  # mkqnximage image has no libzstd.so). libsocket: the MQTT output. libyaml is
+  # vendored. pthreads are in libc on QNX: no -lpthread.
   DEPS_CFLAGS := -I$(QNX_TARGET)/usr/include/zstd -Ithird_party/libyaml/include -DYAML_DECLARE_STATIC -DRTC_QNX=1 \
                  -D_QNX_SOURCE
   YAML_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(wildcard third_party/libyaml/src/*.c))
   PLATFORM_SRC := $(wildcard src/qnx/*.c)
-  QNX_LIBS := -lcurl -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
+  QNX_LIBS := -lcurl -lsocket -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
 endif
 
 CFLAGS  ?= -O2 -g
@@ -74,11 +74,12 @@ endif
 
 CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config.c \
             src/core/cpumath.c src/core/inputs.c src/core/lp.c src/core/lpdrain.c src/core/sched.c \
-            src/core/log.c src/core/collector.c src/inputs/internal.c \
-            src/outputs/arc_encode.c src/outputs/arc.c src/outputs/stdout.c
+            src/core/log.c src/core/mqtt.c src/core/collector.c src/inputs/internal.c \
+            src/outputs/row.c src/outputs/arc_encode.c src/outputs/arc.c src/outputs/mqtt.c src/outputs/stdout.c
 TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpack.c \
             tests/test_config.c tests/test_arc_encode.c tests/test_arc_http.c tests/fake_arc.c \
-            tests/mp_read.c tests/test_cpumath.c tests/test_lp.c tests/test_lpdrain.c tests/test_sched.c
+            tests/mp_read.c tests/test_cpumath.c tests/test_lp.c tests/test_lpdrain.c tests/test_sched.c \
+            tests/test_stdout.c tests/test_mqtt_codec.c tests/test_mqtt.c tests/fake_broker.c
 
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o) $(PLATFORM_SRC:%.c=$(BUILD)/%.o) $(YAML_OBJ)
 TEST_OBJ := $(TEST_SRC:%.c=$(BUILD)/%.o)
@@ -111,6 +112,7 @@ tsan:
 	$(TSAN_RUN) build-tsan/rtc_tests ring
 	$(TSAN_RUN) build-tsan/rtc_tests lifecycle
 	$(TSAN_RUN) build-tsan/rtc_tests lpdrain
+	$(TSAN_RUN) build-tsan/rtc_tests mqtt
 
 FMT_FILES := $(shell find src tests include -name '*.[ch]')
 

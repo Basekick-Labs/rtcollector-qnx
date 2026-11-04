@@ -3,6 +3,7 @@
 
 #include "../src/core/log.h"
 
+#include <signal.h>
 #include <string.h>
 
 int t_failures, t_checks;
@@ -19,13 +20,18 @@ SUITE(cpumath)
 SUITE(lp)
 SUITE(lpdrain)
 SUITE(sched)
+SUITE(stdout)
+SUITE(mqtt_codec)
+SUITE(mqtt)
 
 static const t_case *suites[] = {record_cases,     msgpack_cases,  ring_cases,      config_cases,
                                  arc_encode_cases, arc_http_cases, lifecycle_cases, cpumath_cases,
-                                 lp_cases,         lpdrain_cases,  sched_cases};
+                                 lp_cases,         lpdrain_cases,  sched_cases,     stdout_cases,
+                                 mqtt_codec_cases, mqtt_cases};
 
 int main(int argc, char **argv)
 {
+	signal(SIGPIPE, SIG_IGN); /* as the collector does; fake servers write to closed peers */
 	int ran = 0;
 	for (size_t s = 0; s < sizeof(suites) / sizeof(suites[0]); s++)
 		for (const t_case *c = suites[s]; c->fn; c++) {

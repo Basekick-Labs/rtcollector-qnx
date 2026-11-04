@@ -73,6 +73,7 @@ static int gather(rtc_collector *c)
 		F(&b, "records_rejected", &q->records_rejected);
 		F(&b, "points_dropped_partial", &q->points_dropped_partial);
 		F(&b, "records_outcome_unknown", &q->records_outcome_unknown);
+		F(&b, "records_resent", &q->records_resent);
 		F(&b, "requests", &q->requests);
 		F(&b, "request_errors", &q->request_errors);
 		F(&b, "retries", &q->retries);

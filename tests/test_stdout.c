@@ -122,7 +122,25 @@ static void configured_host_beats_record_host(void)
 		fprintf(stderr, "     got: %s", out);
 }
 
+/* Two host tags in one record: the first counts, as in the Arc output. */
+static void first_record_host_counts(void)
+{
+	rtc_config cfg;
+	cfg_init(&cfg);
+	recs b = {0};
+	rtc_rec_builder *r = begin(&b, "app");
+	rtc_rb_tag(r, "host", "a");
+	rtc_rb_tag(r, "host", "b");
+	rtc_rb_i64(r, "x", 1);
+	end(&b, r);
+	const char *out = print(&cfg, &b);
+	CHECK(!strcmp(out, "app,host=a x=1i 1000\n"));
+	if (strcmp(out, "app,host=a x=1i 1000\n"))
+		fprintf(stderr, "     got: %s", out);
+}
+
 const t_case stdout_cases[] = {
+    {"stdout", "first_record_host_counts", first_record_host_counts},
     {"stdout", "tag_precedence", tag_precedence},
     {"stdout", "configured_host_beats_record_host", configured_host_beats_record_host},
     {0},

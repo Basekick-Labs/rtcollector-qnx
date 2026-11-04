@@ -112,6 +112,7 @@ tsan:
 	$(TSAN_RUN) build-tsan/rtc_tests ring
 	$(TSAN_RUN) build-tsan/rtc_tests lifecycle
 	$(TSAN_RUN) build-tsan/rtc_tests lpdrain
+	$(TSAN_RUN) build-tsan/rtc_tests mqtt
 
 FMT_FILES := $(shell find src tests include -name '*.[ch]')
 

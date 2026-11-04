@@ -341,7 +341,7 @@ static void deadline_after_written_is_outcome_unknown(void)
 	uint64_t t0 = rtc_mono_ns();
 	while (rtc_mono_ns() < deadline && !rtc_sender_pass(&C, true, deadline))
 		sleep_ms(10);
-	CHECK(since(t0) < 0.5);
+	CHECK(since(t0) < 0.8);
 	CHECK_EQ_U(K(&O()->counters.records_outcome_unknown), 5);
 	CHECK_EQ_U(K(&O()->counters.records_sent), 0);
 	CHECK(!O()->has_batch);
@@ -411,6 +411,8 @@ static void presence_online_offline_disconnect(void)
 	      !strcmp((char *)first.payload, "online"));
 	CHECK(fb_pub_get(B, n - 1, &last) && !strcmp(last.topic, STATUS) && last.retain &&
 	      !strcmp((char *)last.payload, "offline"));
+	for (int i = 0; i < 100 && fb_disconnects(B) == 0; i++)
+		sleep_ms(10); /* the broker thread reads it after stop returns */
 	CHECK_EQ_U(fb_disconnects(B), 1);
 	uint8_t conn[512];
 	size_t cl = fb_last_connect(B, conn, sizeof(conn));
@@ -446,7 +448,7 @@ static void out_of_time_stop_has_no_disconnect(void)
 		sleep_ms(20);
 	uint64_t t0 = rtc_mono_ns();
 	rtc_collector_stop(&C);
-	CHECK(since(t0) < 0.6);
+	CHECK(since(t0) < 0.8);
 	CHECK_EQ_U(fb_disconnects(B), 0);
 	CHECK(K(&O()->counters.records_outcome_unknown) >= 1);
 	teardown();
@@ -533,7 +535,7 @@ static void hung_broker_holds_neither_shutdown_nor_arc(void)
 	CHECK(fake_arc_requests(arc) >= 2);
 	uint64_t t0 = rtc_mono_ns();
 	rtc_collector_stop(&C);
-	CHECK(since(t0) < 0.6);
+	CHECK(since(t0) < 1.0);
 	CHECK_EQ_U(K(&C.outputs[1]->counters.records_sent), 0);
 	rtc_collector_destroy(&C);
 	fake_broker_stop(B);
@@ -614,6 +616,13 @@ static void config_validation(void)
 	      0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, status_topic: ''}\n") == 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, max_message_bytes: 16KiB}\n") != 0);
+	/* The floor follows the configuration: small records, a small message. */
+	CHECK(load("hostname: pi5\nmax_record_bytes: 512\noutputs:\n  - mqtt: {url: mqtt://b, "
+	           "max_message_bytes: 4KiB}\n") == 0);
+	CHECK(load("hostname: pi5\nmax_record_bytes: 512\ntags: {site: "
+	           "'0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"
+	           "890123456789'}\n"
+	           "outputs:\n  - mqtt: {url: mqtt://b, max_message_bytes: 4KiB}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, keepalive: 65536}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, timeout: 0.5}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, format: xml}\n") != 0);

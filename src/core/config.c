@@ -3,7 +3,7 @@
 #include "log.h"
 #include "collector.h"
 #include "ring.h"
-#include "../outputs/row.h"
+#include "mqtt.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -659,7 +659,7 @@ static int validate_mqtt(rtc_config *c)
 		if (!strcmp(c->tags[i].key, "host"))
 			host = c->tags[i].val;
 
-	char m128[129], t[RTC_MQTT_TOPIC_MAX * 2], tw[RTC_MQTT_TOPIC_MAX * 2];
+	char m128[129], t[RTC_MQTT_TOPIC_MAX * 2], tw[RTC_MQTT_TOPIC_MAX * 2] = "";
 	memset(m128, 'm', 128);
 	m128[128] = '\0';
 	const char *mp = strstr(q->topic, "{measurement}");
@@ -710,16 +710,20 @@ static int validate_mqtt(rtc_config *c)
 		}
 	}
 
-	/* Worst case for one row: JSON escapes a byte into six; the injected
-	 * tags (up to 16 x 384 bytes); keys and punctuation; the PUBLISH header. */
-	size_t worst =
-	    6 * (size_t)c->max_record_bytes + 6 * (RTC_CFG_MAX_TAGS * 384) + 256 + RTC_MQTT_TOPIC_MAX + 9;
+	/* Worst case for one row in this configuration: JSON escapes a byte into
+	 * six, in the record and in the injected tags (configured tags, the
+	 * host); keys and punctuation; the PUBLISH header with the longest topic. */
+	size_t inj = 4 + strlen(c->hostname);
+	for (unsigned i = 0; i < c->ntags; i++)
+		inj += strlen(c->tags[i].key) + strlen(c->tags[i].val);
+	size_t worst = 6 * ((size_t)c->max_record_bytes + inj) + 256 + RTC_MQTT_PUBLISH_OVERHEAD + strlen(tw);
 	if (q->max_message_bytes < 1024 || q->max_message_bytes > (256u << 20) ||
 	    q->max_message_bytes < worst) {
 		RTC_ERROR(C,
-		          "outputs.mqtt.max_message_bytes: must be from 1KiB to 256MiB and at least %zu "
-		          "(6 x max_record_bytes + 6 x 16 x 384 + %d)",
-		          worst, 256 + RTC_MQTT_TOPIC_MAX + 9);
+		          "outputs.mqtt.max_message_bytes: must be from 1KiB to 256MiB and hold the largest "
+		          "row of this configuration: at least %zu (6 x (max_record_bytes + tags and host) + "
+		          "topic and header)",
+		          worst);
 		bad++;
 	}
 	if (q->batch_bytes < c->max_record_bytes || q->batch_bytes > c->buffer_bytes) {

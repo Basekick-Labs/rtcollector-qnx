@@ -3,43 +3,6 @@
 #include <math.h>
 #include <string.h>
 
-bool rtc_utf8_valid(const char *s, size_t n)
-{
-	const unsigned char *p = (const unsigned char *)s;
-	size_t i = 0;
-	while (i < n) {
-		unsigned char c = p[i];
-		size_t need;
-		uint32_t cp;
-		if (c < 0x80) {
-			i++;
-			continue;
-		} else if ((c & 0xe0) == 0xc0) {
-			need = 1;
-			cp = c & 0x1f;
-		} else if ((c & 0xf0) == 0xe0) {
-			need = 2;
-			cp = c & 0x0f;
-		} else if ((c & 0xf8) == 0xf0) {
-			need = 3;
-			cp = c & 0x07;
-		} else
-			return false;
-		if (n - i - 1 < need)
-			return false;
-		for (size_t j = 1; j <= need; j++) {
-			if ((p[i + j] & 0xc0) != 0x80)
-				return false;
-			cp = (cp << 6) | (p[i + j] & 0x3f);
-		}
-		if ((need == 1 && cp < 0x80) || (need == 2 && cp < 0x800) || (need == 3 && cp < 0x10000) ||
-		    cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
-			return false;
-		i += need + 1;
-	}
-	return true;
-}
-
 static bool str_eq(rtc_str a, const char *b, size_t bl)
 {
 	return a.len == bl && memcmp(a.p, b, bl) == 0;

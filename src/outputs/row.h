@@ -66,6 +66,4 @@ typedef struct {
 bool rtc_row_admit(rtc_row_cols *s, const rtc_rec_view *v, const rtc_row_inj *in, unsigned nin,
                    rtc_output_counters *k, bool count_nonfinite);
 
-bool rtc_utf8_valid(const char *s, size_t n);
-
 #endif

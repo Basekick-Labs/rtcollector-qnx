@@ -305,8 +305,17 @@ static void *monitor_main(void *arg)
 {
 	(void)arg;
 	int rc = tracelog_monitor(on_monitor);
-	if (rc != 0 && rc != EINTR && !atomic_load(&st.stopping))
-		RTC_WARN(C, "trace monitor ended: %s", strerror(rc));
+	if (rc != 0 && rc != EINTR && !atomic_load(&st.stopping)) {
+		/* EEXIST: another process holds the monitor (a second collector).
+		 * Without it this one can never trace: say so in the counters, not
+		 * only in the log. */
+		if (rc == EEXIST)
+			RTC_WARN(C, "another process monitors the kernel trace (a second collector?); tracing disabled");
+		else
+			RTC_WARN(C, "trace monitor ended: %s; tracing disabled", strerror(rc));
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&st.c->counters.trace_unavailable, 1);
+	}
 	return NULL;
 }
 

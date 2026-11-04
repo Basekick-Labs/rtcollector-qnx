@@ -72,9 +72,11 @@ static struct {
 #define tracelog_monitor          tl.monitor
 #define tracelog_monitor_stop     tl.monitor_stop
 
+static const char tracelog_lib[] = "libtracelog.so.1";
+
 static bool load_tracelog(void)
 {
-	void *h = dlopen("libtracelog.so.1", RTLD_NOW);
+	void *h = dlopen(tracelog_lib, RTLD_NOW);
 	if (!h)
 		return false;
 	/* Assigned through void ** so the object-to-function pointer conversion
@@ -552,7 +554,7 @@ static int init(rtc_collector *c)
 static void start(rtc_collector *c)
 {
 	if (!load_tracelog()) {
-		RTC_WARN(C, "cannot load libtracelog.so.1 (%s); the collector runs without kernel tracing",
+		RTC_WARN(C, "cannot load %s (%s); the collector runs without kernel tracing", tracelog_lib,
 		         dlerror());
 		rtc_counter_set(&st.k.unavailable, 1);
 		rtc_counter_set(&c->counters.trace_unavailable, 1);

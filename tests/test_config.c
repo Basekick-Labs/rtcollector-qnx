@@ -183,8 +183,27 @@ static void qnx_keys(void)
 	CHECK(c.collect_priority == 10 && c.send_priority == 9 && c.processes_every == 6);
 }
 
+/* The trace keys' defaults never refuse a configuration that does not use the
+ * trace input: a long interval clamps the derived trace_interval. */
+static void trace_defaults_follow_interval(void)
+{
+	rtc_config c;
+	CHECK(load(&c, "interval: 7200\noutputs: [stdout]\n") == 0);
+	CHECK(c.trace_interval_s == 3600);
+	CHECK(load(&c, "interval: 0.5\noutputs: [stdout]\n") == 0);
+	CHECK(c.trace_interval_s == 1);
+	CHECK(load(&c, "interval: 30\noutputs: [stdout]\n") == 0);
+	CHECK(c.trace_interval_s == 30);
+	CHECK(load(&c, "trace_interval: 2.5\noutputs: [stdout]\n") == 0);
+	CHECK(c.trace_interval_s == 2.5);
+	CHECK(load(&c, "trace_max_threads: 16385\noutputs: [stdout]\n") == -1);
+	CHECK(load(&c, "trace_top: 257\noutputs: [stdout]\n") == -1);
+	CHECK(load(&c, "trace_max_bytes: 65MiB\noutputs: [stdout]\n") == -1);
+}
+
 const t_case config_cases[] = {
     {"config", "qnx_keys", qnx_keys},
+    {"config", "trace_defaults_follow_interval", trace_defaults_follow_interval},
     {"config", "small_buffer_clamps_default_batch", small_buffer_clamps_default_batch},
     {"config", "loads_rtcollector_shape", loads_rtcollector_shape},
     {"config", "defaults", defaults},

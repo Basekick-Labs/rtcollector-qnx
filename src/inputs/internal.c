@@ -38,6 +38,7 @@ static int gather(rtc_collector *c)
 	F(&b, "priority_fallback", &k->priority_fallback);
 	F(&b, "rmgr_unavailable", &k->rmgr_unavailable);
 	F(&b, "rmgr_thread_deaths", &k->rmgr_thread_deaths);
+	F(&b, "trace_unavailable", &k->trace_unavailable);
 	rtc_rb_i64(&b, "buffer_bytes", clamp(c->ring.cap));
 	rtc_emit(c, &b);
 

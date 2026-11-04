@@ -42,7 +42,7 @@ ifeq ($(PLATFORM),qnx)
                  -D_QNX_SOURCE
   YAML_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(wildcard third_party/libyaml/src/*.c))
   PLATFORM_SRC := $(wildcard src/qnx/*.c)
-  QNX_LIBS := -lcurl -Wl,-Bstatic -lzstd -Wl,-Bdynamic -lm
+  QNX_LIBS := -lcurl -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
 endif
 
 CFLAGS  ?= -O2 -g
@@ -73,12 +73,12 @@ ifeq ($(SANITIZE),thread)
 endif
 
 CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config.c \
-            src/core/cpumath.c src/core/inputs.c src/core/lp.c src/core/lpdrain.c \
+            src/core/cpumath.c src/core/inputs.c src/core/lp.c src/core/lpdrain.c src/core/sched.c \
             src/core/log.c src/core/collector.c src/inputs/internal.c \
             src/outputs/arc_encode.c src/outputs/arc.c src/outputs/stdout.c
 TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpack.c \
             tests/test_config.c tests/test_arc_encode.c tests/test_arc_http.c tests/fake_arc.c \
-            tests/mp_read.c tests/test_cpumath.c tests/test_lp.c tests/test_lpdrain.c
+            tests/mp_read.c tests/test_cpumath.c tests/test_lp.c tests/test_lpdrain.c tests/test_sched.c
 
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o) $(PLATFORM_SRC:%.c=$(BUILD)/%.o) $(YAML_OBJ)
 TEST_OBJ := $(TEST_SRC:%.c=$(BUILD)/%.o)
@@ -91,15 +91,15 @@ $(BUILD)/third_party/%.o: third_party/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(THIRD_PARTY_CFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: %.c
+$(BUILD)/%.o: %.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD)/rtcollector: $(CORE_OBJ) $(BUILD)/src/main.o
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+$(BUILD)/rtcollector: $(CORE_OBJ) $(BUILD)/src/main.o Makefile
+	$(CC) $(LDFLAGS) $(filter %.o,$^) $(LDLIBS) -o $@
 
-$(BUILD)/rtc_tests: $(CORE_OBJ) $(TEST_OBJ)
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+$(BUILD)/rtc_tests: $(CORE_OBJ) $(TEST_OBJ) Makefile
+	$(CC) $(LDFLAGS) $(filter %.o,$^) $(LDLIBS) -o $@
 
 test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
 	$(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'

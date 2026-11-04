@@ -59,6 +59,7 @@ tools (a CPU hog pinned to each core, `pidin` memory and process counts).
 | `mem` (QNX) | `mem` | `total_bytes`, `free_bytes`, `used_bytes`, `used_percent` |
 | `processes` (QNX) | `processes` | `processes`, and `threads` when the collector may query other processes (root, or `PROCMGR_AID_XPROCESS_QUERY`). Without it, `internal_collector.procfs_denied` is 1 and only the process count is sent |
 | `rmgr` (QNX) | what programs write | `/dev/rtcollector`: any program publishes metrics by writing line protocol to it. See below |
+| `trace` (QNX) | `sched`, `cpu_sched`, `irq`, `internal_trace` | Scheduling latency per thread, context switches and interrupts, from the kernel trace. Needs the instrumented kernel. See below |
 
 ## Publishing from your program: `/dev/rtcollector`
 
@@ -122,6 +123,87 @@ collector runs without `/dev/rtcollector` and `rmgr_unavailable` is 1. A
 second collector refuses a path that is already registered. `--once` does not
 start it.
 
+## Scheduling latency from the kernel trace: `trace`
+
+How long does each thread wait between becoming ready and running? The
+`trace` input answers it from the QNX kernel trace, for every thread, without
+touching their code. Every `trace_interval` it sends, per thread that woke up:
+
+| Measurement | Tags | Fields |
+|---|---|---|
+| `sched` | `process`, `thread`, `pid`, `tid` | `wakeups`, `latency_p50_ns`, `latency_p99_ns`, `latency_max_ns` (ready to running), `run_ns`, `preemptions`, `priority` (highest seen) |
+| `cpu_sched` | `cpu` | `context_switches`, `interrupts` |
+| `irq` | `vector` | `count` |
+| `internal_trace` | | the input's own counters, below |
+
+Latencies come from a histogram with about 12% resolution; `latency_max_ns`
+is exact. Rows are every thread at or above `trace_min_priority` (the worst
+p99 first if they do not all fit in `trace_max_rows`), then the `trace_top`
+others with the highest p99, up to `trace_max_rows`; the rest, and threads
+that woke and exited before the rows were taken, are counted in
+`threads_omitted`. procnto's idle threads are left out. Rows carry the time
+their interval ended.
+
+On a 4-CPU QEMU guest, with a priority-30 thread busy 5 ms out of every 10 on
+one CPU: a priority-40 thread on the same CPU shows a p99 of about 16 µs (it
+preempts), a priority-20 thread shows about 6 ms (it waits out the burst).
+`scripts/qnx-validate-trace.sh` checks this and the cases below on the target.
+
+How it works and what it costs:
+
+- The kernel writes events into its buffers; threads of the collector at
+  `trace_priority` (default 15) copy them to a file in `/dev/shmem` and start
+  a new file every interval; a parser thread, below the sender, reads each
+  finished file. Only the thread, process and interrupt classes are traced.
+  Tracing has a cost in the kernel on every event: measure it on your system
+  before you keep it on in production. If `trace_priority` cannot be had
+  (above 63 needs root or `PROCMGR_AID_PRIORITY`), the threads run at the
+  priority they inherit and `priority_fallback` is counted.
+- Memory: about 1.3 KB per tracked thread (`trace_max_threads`), and up to
+  four files of `trace_max_bytes` in `/dev/shmem` (RAM): the one being
+  written, two waiting, one being parsed.
+- If real-time threads keep the collector's threads from running, the kernel
+  drops events rather than wait (`kernel_dropped`). Bytes over
+  `trace_max_bytes` in an interval are dropped (`bytes_dropped`); if the
+  parser falls two intervals behind, the oldest file is dropped
+  (`files_dropped`). After any of these, after a file that could not be
+  parsed completely, and after a yield, the pending
+  ready-to-running waits are forgotten: a gap never turns into a false
+  latency.
+- Each CPU's events reach the file separately, so an event can arrive after a
+  later one of the same thread; it is ignored and counted (`out_of_order`).
+- A thread whose exit was in dropped events would hold its table slot for
+  ever. When the table is three-quarters full, threads with no event for two
+  intervals that are not ready or running are dropped from it, down to half
+  full (`threads_evicted`); if one runs again, its rows lack the thread name
+  (thread names are traced only when a thread is created or a session
+  starts). New threads past the table's size are not tracked
+  (`threads_overflow` counts their events).
+- Files are removed once parsed, and on exit; files left by a collector that
+  was killed, or by a parse that shutdown did not wait for, are removed by
+  the next collector's start. On shutdown, intervals not yet parsed are
+  dropped. Shutdown runs at `collect_priority`, the parser included; the
+  input's part takes at most about 7 s (5 s for the trace monitor, 2 s for
+  the parser), before `shutdown_timeout`.
+- Only one process can trace at a time. When another tool asks for the trace
+  (`tracelogger`, for example), the collector stops and gives it the trace
+  (`yielded`), and starts again when it is done (`sessions`).
+- Tracing needs `procnto-smp-instr` (the kernel QNX 8.0 ships) and root, or
+  `PROCMGR_AID_TRACE` (`on -A trace,allow,nonroot`). Without them, without
+  `libtracelog.so.1`, when a second collector already traces, or when a trace
+  session cannot start for any other reason, the input logs why,
+  `internal_trace.unavailable` and `internal_collector.trace_unavailable` are
+  1, and the collector runs on. Tracing then stays off until the collector is
+  restarted. `--once` does not start tracing.
+
+`internal_trace` fields, all totals since start except `parse_ns`:
+`sessions`, `yielded`, `intervals`, `bytes`, `bytes_dropped`,
+`files_dropped`, `events`, `kernel_dropped`, `parse_ns` (the last interval's
+parse), `parse_errors` (files not read to the end, or without a clock rate),
+`threads_overflow`, `out_of_order`, `threads_omitted`, `threads_evicted`,
+`vectors_overflow` (interrupt vectors past 64, not reported), `snapshots_lost`
+(an interval parsed but not collected), `unavailable`.
+
 ## Running
 
 ```sh
@@ -166,6 +248,13 @@ outputs:
 | `rmgr_priority` | `63` | Fixed priority of the device's handler threads: above every writer |
 | `max_write_bytes` | `4096` | Largest write accepted |
 | `rmgr_drain_bytes` | `64KiB` | Bytes converted per handler-thread buffer per collection-thread step (every 20 ms at most) |
+| `trace_interval` | `interval` (1 to 3600) | Seconds per trace interval (1–3600). Shorter than `interval`, intervals the collection rounds do not take are lost (`snapshots_lost`) |
+| `trace_priority` | `15` | QNX: priority of the threads that copy the kernel's events (1–253). Below it, busy real-time threads make the kernel drop events (counted) |
+| `trace_min_priority` | `40` | Threads at or above this priority are always reported |
+| `trace_top` | `16` | Lower-priority threads reported: the ones with the highest p99 (0–256) |
+| `trace_max_rows` | `64` | `sched` rows per interval, at most (1–4096) |
+| `trace_max_threads` | `1024` | Threads tracked at once (16–16384), about 1.3 KB each |
+| `trace_max_bytes` | `4MiB` | Trace bytes kept per interval (64KiB–64MiB); up to four times this in RAM |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |

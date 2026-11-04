@@ -2,6 +2,7 @@
  *   rtc_hog -b 20 -s 5 -t 10
  * The sleeps let lower-priority threads run (so a low-priority writer really
  * writes while the hog competes with its handler). */
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@ static uint64_t now_ns(void)
 
 int main(int argc, char **argv)
 {
+	pthread_setname_np(pthread_self(), "hog"); /* the trace validator looks for it */
 	long busy = 20, sleep_ms = 5, secs = 10;
 	for (int i = 1; i + 1 < argc; i += 2) {
 		if (!strcmp(argv[i], "-b"))

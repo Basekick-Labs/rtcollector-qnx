@@ -59,6 +59,7 @@ typedef struct {
 	 * two at once (the collection thread only reads them): */
 	rtc_counter rmgr_unavailable;   /* 1: /dev/rtcollector could not be registered */
 	rtc_counter rmgr_thread_deaths; /* rmgr handler threads that exited on an error */
+	rtc_counter trace_unavailable;  /* 1: input trace cannot trace (see its log line) */
 } rtc_collect_counters;
 
 /* Written by one resource manager thread (/dev/rtcollector); one set per thread. */

@@ -133,6 +133,7 @@ extern const rtc_input_def rtc_input_cpu;
 extern const rtc_input_def rtc_input_mem;
 extern const rtc_input_def rtc_input_processes;
 extern const rtc_input_def rtc_input_rmgr;
+extern const rtc_input_def rtc_input_trace;
 #endif
 /* The input called name in this build, or NULL. */
 const rtc_input_def *rtc_input_find(const char *name);

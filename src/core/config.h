@@ -18,7 +18,11 @@
  *   rmgr_path: /dev/rtcollector   rmgr input: where programs write line protocol
  *   rmgr_mode: 0660         its permissions (octal); rmgr_group: 0 its group
  *   rmgr_priority: 63       its handlers' fixed priority: above every writer
- *   rmgr_threads: 4         handler threads; rmgr_buffer_bytes is split among them
+ *   rmgr_threads: 4         handler threads, each with an rmgr_buffer_bytes buffer
+ *   trace_interval: =interval  seconds per kernel-trace interval (input trace)
+ *   trace_priority: 15      the trace logger's priority (below real-time work)
+ *   trace_min_priority: 40, trace_top: 16, trace_max_rows: 64   which threads get rows
+ *   trace_max_threads: 1024, trace_max_bytes: 4MiB   bounds
  *   rmgr_buffer_bytes: 256KiB, max_write_bytes: 4096, rmgr_drain_bytes: 64KiB
  *   inputs: [internal, ...] a name, or {name: {config}}
  *   outputs:
@@ -71,6 +75,14 @@ typedef struct {
 	int rmgr_group;        /* gid owning the device */
 	int rmgr_priority;     /* fixed priority of the device's handler threads */
 	unsigned rmgr_threads; /* handler threads (each with its own buffer) */
+	/* kernel trace (input trace, QNX) */
+	double trace_interval_s; /* 0 = interval */
+	int trace_priority;
+	int trace_min_priority;
+	unsigned trace_top;
+	unsigned trace_max_rows;
+	unsigned trace_max_threads;
+	size_t trace_max_bytes;
 	size_t rmgr_buffer_bytes;
 	size_t max_write_bytes;
 	size_t rmgr_drain_bytes;

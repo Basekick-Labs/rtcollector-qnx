@@ -129,6 +129,8 @@ static bool print_rec(rtc_collector *c, const rtc_ring_rec *r, line_buf *f)
  * cut off or on an error; chunks of PIPE_BUF after select says writable do not block. */
 static bool write_all(rtc_collector *c, int fd, const char *p, size_t n)
 {
+	if (fd < 0 || fd >= FD_SETSIZE)
+		return false; /* no usable stdout; select() cannot take it */
 	while (n) {
 		uint64_t abort_after = atomic_load(&c->abort_after_ns);
 		if (abort_after && rtc_mono_ns() >= abort_after)

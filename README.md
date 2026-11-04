@@ -265,8 +265,8 @@ outputs:
 | `outputs.arc.batch_bytes` | `256KiB` | Bytes of records per request, at most (default capped at half of `buffer_bytes`) |
 | `outputs.arc.timeout` | `10` | Request timeout, seconds |
 | `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request (1 to 256) |
-| `outputs.stdout` | off | Print rows as line protocol, for debugging |
-| `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records per write |
+| `outputs.stdout` | off | Print rows as line protocol, for debugging. If nobody reads stdout (a full pipe), shutdown still ends within `shutdown_timeout`; the rows not written are counted as dropped |
+| `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records read from the buffer per batch |
 
 `max_buffer_size` from rtcollector configurations is accepted and ignored:
 rtcollector counted single-value series, this collector buffers multi-field

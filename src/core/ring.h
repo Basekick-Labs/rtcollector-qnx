@@ -49,8 +49,9 @@ typedef struct {
 	uint64_t cursor[RTC_RING_MAX_OUTPUTS];
 	uint64_t expect_seq[RTC_RING_MAX_OUTPUTS];
 
-	/* Test seam: called by rtc_ring_read between claiming and copying. */
-	void (*copy_hook)(void *arg);
+	/* Test seam: called by rtc_ring_read for output o between claiming and
+	 * copying. */
+	void (*copy_hook)(void *arg, unsigned o);
 	void *copy_hook_arg;
 } rtc_ring;
 
@@ -76,7 +77,8 @@ typedef struct {
  * next read). */
 typedef bool (*rtc_ring_accept)(void *arg, const rtc_ring_rec *rec);
 
-/* Output o copies whole records into dst (dst_cap bytes) and recs (max_recs
+/* Output o (below noutputs: the producer only respects the claims of those)
+ * copies whole records into dst (dst_cap bytes) and recs (max_recs
  * entries). Returns the number of records copied; *dropped receives the
  * number of records this output lost to eviction since its last read. */
 size_t rtc_ring_read(rtc_ring *r, unsigned o, uint8_t *dst, size_t dst_cap, rtc_ring_rec *recs,

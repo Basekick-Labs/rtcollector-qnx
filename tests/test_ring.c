@@ -124,8 +124,9 @@ typedef struct {
 	int pushed_ok, dropped_newest;
 } hook_ctx;
 
-static void push_inside_claim(void *arg)
+static void push_inside_claim(void *arg, unsigned o)
 {
+	(void)o;
 	hook_ctx *h = arg;
 	uint8_t p[128];
 	for (int i = 0; i < 6; i++) {
@@ -233,8 +234,9 @@ static void *producer(void *arg)
 
 static _Atomic unsigned hook_calls;
 
-static void slow_copy(void *arg)
+static void slow_copy(void *arg, unsigned o)
 {
+	(void)o;
 	(void)arg;
 	/* Every few reads, stall inside the claim so the producer runs into it
 	 * and has to choose between eviction and drop-newest mid-copy. */
@@ -300,8 +302,9 @@ typedef struct {
 	enum rtc_push_result res;
 } one_push;
 
-static void push_one(void *arg)
+static void push_one(void *arg, unsigned o)
 {
+	(void)o;
 	one_push *p = arg;
 	uint8_t b[128];
 	make_payload(b, 77, 60);
@@ -344,7 +347,138 @@ static void unseen_counts_evictions_without_a_later_record(void)
 	rtc_ring_free(&r);
 }
 
+/* Several outputs holding claims at once: the producer respects the oldest,
+ * whichever output holds it. Output 1 has already read past seq 0; while
+ * output 0 copies seq 0, output 1 claims too, and a push that would evict
+ * seq 0 is dropped instead. */
+typedef struct {
+	rtc_ring *r;
+	enum rtc_push_result res;
+	size_t inner_n;
+	bool pushed;
+} nested_ctx;
+
+static void nested_claims(void *arg, unsigned o)
+{
+	nested_ctx *h = arg;
+	if (o == 0) {
+		uint8_t dst[512];
+		rtc_ring_rec recs[8];
+		uint64_t dropped;
+		h->inner_n = rtc_ring_read(h->r, 1, dst, sizeof(dst), recs, 8, NULL, NULL, &dropped);
+	} else if (o == 1 && !h->pushed) {
+		uint8_t b[128];
+		make_payload(b, 99, 60);
+		h->res = rtc_ring_push(h->r, b, 60, 0);
+		h->pushed = true;
+	}
+}
+
+static void concurrent_claims_protect_the_oldest(void)
+{
+	rtc_ring r;
+	CHECK(rtc_ring_init(&r, 256, 100, 3) == 0);
+	push_n(&r, 0, 3, 60); /* 240 of 256 bytes */
+	uint8_t dst[512];
+	rtc_ring_rec recs[8];
+	uint64_t dropped;
+	CHECK_EQ_U(rtc_ring_read(&r, 1, dst, sizeof(dst), recs, 1, NULL, NULL, &dropped), 1);
+	nested_ctx h = {&r, RTC_PUSH_OK, 0, false};
+	r.copy_hook = nested_claims;
+	r.copy_hook_arg = &h;
+	size_t n = rtc_ring_read(&r, 0, dst, sizeof(dst), recs, 8, NULL, NULL, &dropped);
+	r.copy_hook = NULL;
+	CHECK(h.pushed);
+	CHECK(h.res == RTC_PUSH_DROPPED); /* evicting seq 0 would pass output 0's claim */
+	CHECK_EQ_U(h.inner_n, 2);
+	CHECK_EQ_U(n, 3);
+	for (size_t i = 0; i < n; i++) {
+		uint64_t id;
+		CHECK(check_payload(recs[i].payload, recs[i].len, &id));
+		CHECK_EQ_U(id, i);
+	}
+	/* Output 2 never claimed and still has everything. */
+	CHECK_EQ_U(rtc_ring_read(&r, 2, dst, sizeof(dst), recs, 8, NULL, NULL, &dropped), 3);
+	CHECK_EQ_U(dropped, 0);
+	rtc_ring_free(&r);
+}
+
+/* Three readers on their own threads and one producer (one sender thread per
+ * output): each reader gets every record intact and in order, or counts it. */
+typedef struct {
+	rtc_ring *r;
+	prod_ctx *p;
+	unsigned o;
+	uint64_t delivered, gaps, bad, order;
+} reader_ctx;
+
+static void *reader(void *arg)
+{
+	reader_ctx *x = arg;
+	uint8_t *dst = malloc(2048);
+	rtc_ring_rec recs[256];
+	uint64_t last_id = 0;
+	bool any = false;
+	for (unsigned iter = 0;; iter++) {
+		bool fin = atomic_load(&x->p->done);
+		if (iter % (13 + x->o) == 0) {
+			struct timespec s = {0, 200000 + 100000 * x->o};
+			nanosleep(&s, NULL);
+		}
+		uint64_t dropped;
+		size_t n = rtc_ring_read(x->r, x->o, dst, 2048, recs, 256, NULL, NULL, &dropped);
+		x->gaps += dropped;
+		for (size_t i = 0; i < n; i++) {
+			uint64_t id;
+			if (!check_payload(recs[i].payload, recs[i].len, &id))
+				x->bad++;
+			if (any && id <= last_id)
+				x->order++;
+			last_id = id;
+			any = true;
+			x->delivered++;
+		}
+		if (fin && n == 0 && rtc_ring_pending(x->r, x->o) == 0)
+			break;
+	}
+	free(dst);
+	return NULL;
+}
+
+static void stress_three_reader_threads(void)
+{
+	rtc_ring r;
+	CHECK(rtc_ring_init(&r, 4096, 200, 3) == 0);
+	r.copy_hook = slow_copy;
+	prod_ctx p = {&r, false, 0};
+	reader_ctx x[3];
+	pthread_t rt[3], pt;
+	for (unsigned i = 0; i < 3; i++) {
+		x[i] = (reader_ctx){&r, &p, i, 0, 0, 0, 0};
+		pthread_create(&rt[i], NULL, reader, &x[i]);
+	}
+	pthread_create(&pt, NULL, producer, &p);
+	pthread_join(pt, NULL);
+	for (unsigned i = 0; i < 3; i++)
+		pthread_join(rt[i], NULL);
+	uint64_t gaps = 0;
+	for (unsigned i = 0; i < 3; i++) {
+		CHECK_EQ_U(x[i].bad, 0);
+		CHECK_EQ_U(x[i].order, 0);
+		CHECK_EQ_U(x[i].delivered + x[i].gaps + p.dropped_newest, STRESS_N);
+		gaps += x[i].gaps;
+	}
+	CHECK(gaps > 0);
+	CHECK(p.dropped_newest > 0);
+	fprintf(stderr, "     3 readers: delivered=%llu/%llu/%llu dropped_newest=%llu\n",
+	        (unsigned long long)x[0].delivered, (unsigned long long)x[1].delivered,
+	        (unsigned long long)x[2].delivered, (unsigned long long)p.dropped_newest);
+	rtc_ring_free(&r);
+}
+
 const t_case ring_cases[] = {
+    {"ring", "concurrent_claims_protect_the_oldest", concurrent_claims_protect_the_oldest},
+    {"ring", "stress_three_reader_threads", stress_three_reader_threads},
     {"ring", "eviction_respects_claims_of_every_output", eviction_respects_claims_of_every_output},
     {"ring", "unseen_counts_evictions_without_a_later_record",
      unseen_counts_evictions_without_a_later_record},

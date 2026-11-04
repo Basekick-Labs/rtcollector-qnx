@@ -91,7 +91,14 @@ struct rtc_collector {
 	/* Set at shutdown and in --once: in-flight requests are aborted once
 	 * CLOCK_MONOTONIC passes it. 0 = no limit. */
 	_Atomic uint64_t abort_after_ns;
-	pthread_t collect_thread, send_thread;
+	pthread_t collect_thread;
+	/* One sender thread per output (send_threads[i] runs outputs[i]), so a
+	 * destination that hangs never delays another. nsend: how many started. */
+	pthread_t send_threads[RTC_RING_MAX_OUTPUTS];
+	unsigned nsend;
+	/* Test seam: thread start number fail_thread_at (1-based, counted in
+	 * threads_started) fails as if pthread_create had. 0 = never. */
+	unsigned fail_thread_at, threads_started;
 };
 
 /* Builds everything from the configuration. Allocations happen here only.
@@ -140,7 +147,9 @@ const rtc_input_def *rtc_input_find(const char *name);
 int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out);
 int rtc_output_stdout_create(rtc_collector *c, unsigned idx, rtc_output **out);
 
-/* Sender: one pass over the outputs. final: flush regardless of intervals.
+/* Sender for --once and tests: one pass over every output, on the calling
+ * thread. With threads, each output runs on its own sender instead.
+ * final: flush regardless of intervals.
  * deadline_ns bounds every request (0 = none). Returns true when no output
  * holds an unsent batch or pending ring data. */
 bool rtc_sender_pass(rtc_collector *c, bool final, uint64_t deadline_ns);

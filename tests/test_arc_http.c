@@ -464,7 +464,72 @@ static void shutdown_counts_unsent_as_dropped(void)
 	teardown();
 }
 
+/* One sender per output: Arc hanging on a request does not hold back stdout,
+ * and stop still ends within shutdown_timeout. */
+static void hung_arc_does_not_delay_stdout(void)
+{
+	fake_reply s[] = {{0, ""}};
+	setup_stdout = true;
+	CHECK(setup(s, 1, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.arc.timeout_ms = 30000;
+	R.c.cfg.shutdown_timeout_s = 0.5;
+	R.c.cfg.interval_s = 0.05;
+	R.c.cfg.flush_interval_s = 0.05;
+	FILE *saved = stdout;
+	stdout = fopen("/dev/null", "w");
+	CHECK(rtc_collector_start(&R.c) == 0);
+	for (int i = 0; i < 100 && fake_arc_requests(R.f) == 0; i++) {
+		struct timespec ts = {0, 20000000};
+		nanosleep(&ts, NULL);
+	}
+	CHECK_EQ_U(fake_arc_requests(R.f), 1); /* hanging now */
+	uint64_t before = rtc_counter_get(&R.c.outputs[1]->counters.records_sent);
+	struct timespec ts = {0, 400000000};
+	nanosleep(&ts, NULL);
+	uint64_t after = rtc_counter_get(&R.c.outputs[1]->counters.records_sent);
+	CHECK(after > before);
+	CHECK_EQ_U(fake_arc_requests(R.f), 1);
+	uint64_t t0 = rtc_mono_ns();
+	rtc_collector_stop(&R.c);
+	CHECK(since(t0) < 1.0);
+	fclose(stdout);
+	stdout = saved;
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[1]->counters.records_sent), gathered);
+	uint64_t accounted = rtc_counter_get(&K()->records_sent) + rtc_counter_get(&K()->records_dropped) +
+	                     rtc_counter_get(&K()->records_outcome_unknown);
+	CHECK_EQ_U(accounted, gathered);
+	teardown();
+	setup_stdout = false;
+}
+
+/* A thread that cannot start: the senders already running are stopped and
+ * joined before start returns, whichever thread failed. */
+static void failed_start_unwinds_every_sender(void)
+{
+	for (unsigned at = 2; at <= 3; at++) { /* 2: stdout's sender; 3: collection */
+		setup_stdout = true;
+		CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+		R.c.cfg.flush_interval_s = 0.01;
+		R.c.fail_thread_at = at;
+		emit("cpu", 3);
+		CHECK(rtc_collector_start(&R.c) == -1);
+		CHECK_EQ_U(R.c.nsend, 0);
+		CHECK(atomic_load(&R.c.stop));
+		/* Nothing runs any more: records emitted now are never sent. */
+		emit("cpu", 3);
+		struct timespec ts = {0, 200000000};
+		nanosleep(&ts, NULL);
+		CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 0);
+		CHECK_EQ_U(fake_arc_requests(R.f), 0);
+		teardown();
+		setup_stdout = false;
+	}
+}
+
 const t_case lifecycle_cases[] = {
+    {"lifecycle", "hung_arc_does_not_delay_stdout", hung_arc_does_not_delay_stdout},
+    {"lifecycle", "failed_start_unwinds_every_sender", failed_start_unwinds_every_sender},
     {"lifecycle", "shutdown_counts_unsent_as_dropped", shutdown_counts_unsent_as_dropped},
     {"lifecycle", "shutdown_budget_bounds_a_hanging_request", shutdown_budget_bounds_a_hanging_request},
     {"lifecycle", "threads_deliver_and_stop_cleanly", threads_deliver_and_stop_cleanly},

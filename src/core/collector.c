@@ -316,23 +316,36 @@ void rtc_collector_account_unsent(rtc_collector *c, bool log)
 	}
 }
 
+/* One output's sender thread. The final flush is bounded by shutdown_timeout
+ * (abort_after_ns, set by stop) for each output on its own. */
 static void *send_main(void *arg)
 {
-	rtc_collector *c = arg;
+	rtc_output *o = arg;
+	rtc_collector *c = o->collector;
 	while (!atomic_load(&c->stop)) {
-		rtc_sender_pass(c, false, 0);
+		output_pass(c, o, false, 0);
 		struct timespec s = {0, 50000000}; /* 50 ms */
 		nanosleep(&s, NULL);
 	}
-	/* Final flush, bounded by shutdown_timeout (abort_after_ns, set by stop). */
 	uint64_t deadline = atomic_load(&c->abort_after_ns);
 	while (rtc_mono_ns() < deadline) {
-		if (rtc_sender_pass(c, true, deadline))
+		if (output_pass(c, o, true, deadline))
 			break;
 		struct timespec s = {0, 20000000};
 		nanosleep(&s, NULL);
 	}
 	return NULL;
+}
+
+/* Stops and joins every sender started so far. Untimed on purpose: an output
+ * is freed after this, so no sender may still be running. The bound comes
+ * from every blocking call honouring abort_after_ns. */
+static void join_senders(rtc_collector *c)
+{
+	atomic_store(&c->stop, true);
+	for (unsigned i = 0; i < c->nsend; i++)
+		pthread_join(c->send_threads[i], NULL);
+	c->nsend = 0;
 }
 
 /* Starts a thread at a fixed SCHED_RR priority set at creation, so it never
@@ -342,6 +355,8 @@ static void *send_main(void *arg)
 int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
                      const char *what)
 {
+	if (c->fail_thread_at && ++c->threads_started == c->fail_thread_at)
+		return EAGAIN;
 #ifdef RTC_QNX
 	pthread_attr_t a;
 	struct sched_param sp = {.sched_priority = prio};
@@ -371,25 +386,30 @@ int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *
 
 int rtc_collector_start(rtc_collector *c)
 {
-	int rc = rtc_start_thread(c, &c->send_thread, send_main, c, c->cfg.send_priority, "sender");
-	if (rc != 0) {
-		RTC_ERROR(C, "cannot start the sender thread: %s", strerror(rc));
-		return -1;
+	for (unsigned i = 0; i < c->noutputs; i++) {
+		int rc = rtc_start_thread(c, &c->send_threads[i], send_main, c->outputs[i],
+		                          c->cfg.send_priority, "sender");
+		if (rc != 0) {
+			RTC_ERROR(C, "cannot start the %s sender thread: %s", c->outputs[i]->name,
+			          strerror(rc));
+			atomic_store(&c->abort_after_ns, rtc_mono_ns());
+			join_senders(c);
+			return -1;
+		}
+		c->nsend++;
 	}
-	rc = rtc_start_thread(c, &c->collect_thread, collect_main, c, c->cfg.collect_priority, "collection");
-	if (rc == 0) {
-		for (unsigned i = 0; i < c->ninputs; i++)
-			if (c->inputs[i]->start)
-				c->inputs[i]->start(c); /* failures are counted by the input, never fatal */
-	}
+	int rc =
+	    rtc_start_thread(c, &c->collect_thread, collect_main, c, c->cfg.collect_priority, "collection");
 	if (rc != 0) {
 		RTC_ERROR(C, "cannot start the collection thread: %s", strerror(rc));
 		atomic_store(&c->abort_after_ns, rtc_mono_ns());
 		atomic_store(&c->stop_collect, true);
-		atomic_store(&c->stop, true);
-		pthread_join(c->send_thread, NULL);
+		join_senders(c);
 		return -1;
 	}
+	for (unsigned i = 0; i < c->ninputs; i++)
+		if (c->inputs[i]->start)
+			c->inputs[i]->start(c); /* failures are counted by the input, never fatal */
 	return 0;
 }
 
@@ -405,11 +425,10 @@ void rtc_collector_stop(rtc_collector *c)
 	uint64_t budget = (uint64_t)llround(c->cfg.shutdown_timeout_s * 1e9);
 	atomic_store(&c->abort_after_ns, rtc_mono_ns() + (budget ? budget : 1));
 	/* The collection thread ends first (its final drain may still push
-	 * records), then the sender flushes what it left. */
+	 * records), then each sender flushes what it left. */
 	atomic_store(&c->stop_collect, true);
 	pthread_join(c->collect_thread, NULL);
-	atomic_store(&c->stop, true);
-	pthread_join(c->send_thread, NULL);
+	join_senders(c);
 	rtc_collector_account_unsent(c, true);
 	if (atomic_load(&c->lp_ndrains)) {
 		/* The internal input no longer runs: report the device's totals here. */

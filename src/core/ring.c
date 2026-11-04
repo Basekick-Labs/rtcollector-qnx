@@ -146,6 +146,11 @@ enum rtc_push_result rtc_ring_push(rtc_ring *r, const uint8_t *payload, uint32_t
 size_t rtc_ring_read(rtc_ring *r, unsigned o, uint8_t *dst, size_t dst_cap, rtc_ring_rec *recs,
                      size_t max_recs, rtc_ring_accept accept, void *accept_arg, uint64_t *dropped)
 {
+	/* min_claim() looks at outputs below noutputs only: a reader past them
+	 * would copy bytes the producer may overwrite meanwhile. A wiring bug,
+	 * never a run-time condition. */
+	if (o >= r->noutputs)
+		abort();
 	uint64_t cur = r->cursor[o];
 	*dropped = 0;
 
@@ -161,7 +166,7 @@ size_t rtc_ring_read(rtc_ring *r, unsigned o, uint8_t *dst, size_t dst_cap, rtc_
 		cur = t2;
 	}
 	if (r->copy_hook)
-		r->copy_hook(r->copy_hook_arg);
+		r->copy_hook(r->copy_hook_arg, o);
 
 	uint64_t head = atomic_load_explicit(&r->head, memory_order_acquire);
 	size_t used = 0, n = 0;

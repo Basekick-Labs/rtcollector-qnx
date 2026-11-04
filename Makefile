@@ -79,7 +79,8 @@ CORE_SRC := src/core/record.c src/core/ring.c src/core/msgpack.c src/core/config
 TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpack.c \
             tests/test_config.c tests/test_arc_encode.c tests/test_arc_http.c tests/fake_arc.c \
             tests/mp_read.c tests/test_cpumath.c tests/test_lp.c tests/test_lpdrain.c tests/test_sched.c \
-            tests/test_stdout.c tests/test_mqtt_codec.c tests/test_mqtt.c tests/fake_broker.c
+            tests/test_stdout.c tests/test_mqtt_codec.c tests/test_mqtt.c tests/fake_broker.c \
+            tests/test_loopstats.c examples/loopstats.c
 
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o) $(PLATFORM_SRC:%.c=$(BUILD)/%.o) $(YAML_OBJ)
 TEST_OBJ := $(TEST_SRC:%.c=$(BUILD)/%.o)
@@ -106,6 +107,7 @@ test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
 	@# pipefail here as well: GNU make 3.81 (macOS) ignores .SHELLFLAGS, and the
 	@# grep's status would hide failing tests.
 	set -o pipefail; $(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'
+	python3 -I scripts/rtc-bench-report.py --self-test
 
 tsan:
 	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests
@@ -114,7 +116,7 @@ tsan:
 	$(TSAN_RUN) build-tsan/rtc_tests lpdrain
 	$(TSAN_RUN) build-tsan/rtc_tests mqtt
 
-FMT_FILES := $(shell find src tests include -name '*.[ch]')
+FMT_FILES := $(shell find src tests include examples -name '*.[ch]')
 
 format:
 	clang-format -i $(FMT_FILES)
@@ -124,19 +126,23 @@ format-check:
 
 lint:
 	cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
-	  --suppress=missingIncludeSystem --inline-suppr -I src src tests
+	  --suppress=missingIncludeSystem --inline-suppr -I src src tests examples/loopstats.c
 
 ARCH ?= x86_64
 qnx:
 	@test -n "$(QNX_TARGET)" || { echo "source qnxsdp-env.sh first"; exit 1; }
 	$(MAKE) PLATFORM=qnx BUILD=build-qnx-$(ARCH) CC="qcc -Vgcc_nto$(ARCH)" \
-	  build-qnx-$(ARCH)/rtcollector build-qnx-$(ARCH)/rtc_writer build-qnx-$(ARCH)/rtc_hog
+	  build-qnx-$(ARCH)/rtcollector build-qnx-$(ARCH)/rtc_writer build-qnx-$(ARCH)/rtc_hog \
+	  build-qnx-$(ARCH)/rtc_loop
 
 $(BUILD)/rtc_writer: tests/qnx/rtc_writer.c include/rtc_publish.h
 	$(CC) $(CFLAGS) $< -o $@
 
 $(BUILD)/rtc_hog: tests/qnx/rtc_hog.c
 	$(CC) $(CFLAGS) $< -o $@
+
+$(BUILD)/rtc_loop: examples/control_loop.c examples/loopstats.c examples/loopstats.h include/rtc_publish.h
+	$(CC) $(CFLAGS) examples/control_loop.c examples/loopstats.c -o $@
 
 clean:
 	rm -rf build build-tsan build-asan build-qnx-*

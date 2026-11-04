@@ -23,11 +23,12 @@ SUITE(sched)
 SUITE(stdout)
 SUITE(mqtt_codec)
 SUITE(mqtt)
+SUITE(loopstats)
 
 static const t_case *suites[] = {record_cases,     msgpack_cases,  ring_cases,      config_cases,
                                  arc_encode_cases, arc_http_cases, lifecycle_cases, cpumath_cases,
                                  lp_cases,         lpdrain_cases,  sched_cases,     stdout_cases,
-                                 mqtt_codec_cases, mqtt_cases};
+                                 mqtt_codec_cases, mqtt_cases,     loopstats_cases};
 
 int main(int argc, char **argv)
 {

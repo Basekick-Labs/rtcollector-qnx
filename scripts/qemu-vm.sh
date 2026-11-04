@@ -42,6 +42,10 @@ run)
 	fi
 	accel=(-cpu max)
 	if [ -w /dev/kvm ]; then accel=(-enable-kvm -cpu host); else echo "no write access to /dev/kvm: using TCG (slow)"; fi
+	if ss -ltnH "sport = :${SERIAL_PORT}" 2>/dev/null | grep -q .; then
+		echo "port ${SERIAL_PORT} is taken (an old VM?): run '$0 stop' first" >&2
+		exit 1
+	fi
 	qemu-system-x86_64 -smp "$CPUS" "${accel[@]}" -m "$RAM" \
 		-kernel output/ifs.bin \
 		-drive file=output/disk-qemu.vmdk,if=ide,id=drv0 \
@@ -55,7 +59,18 @@ run)
 	;;
 stop)
 	cd "$VM_DIR"
-	if [ -f output/qemu.pid ]; then kill "$(cat output/qemu.pid)" 2>/dev/null || true; rm -f output/qemu.pid; fi
+	# The QEMU holding the serial port, even without a pid file: a run that
+	# starts while an old VM still holds the port fails to bind, and every
+	# later command would talk to the old (possibly hung) VM.
+	pids=$( (cat output/qemu.pid 2>/dev/null; ss -ltnpH "sport = :${SERIAL_PORT}" 2>/dev/null |
+		sed -n 's/.*pid=\([0-9]*\).*/\1/p') | sort -u)
+	pids=$(for p in $pids; do case $(cat "/proc/$p/comm" 2>/dev/null) in qemu-system*) echo "$p" ;; esac; done)
+	for p in $pids; do kill "$p" 2>/dev/null || true; done
+	for p in $pids; do
+		for _ in $(seq 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.2; done
+		kill -0 "$p" 2>/dev/null && { kill -9 "$p" 2>/dev/null; sleep 0.5; }
+	done
+	rm -f output/qemu.pid
 	;;
 status)
 	cd "$VM_DIR"

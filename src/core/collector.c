@@ -419,12 +419,14 @@ void rtc_collector_stop(rtc_collector *c)
 		const rtc_collect_counters *k = &c->counters;
 		RTC_INFO("rmgr",
 		         "%s totals: writes=%llu lines=%llu malformed=%llu bad_timestamp=%llu too_large=%llu "
-		         "dropped=%llu oversize=%llu",
+		         "uint_dropped=%llu errors=%llu dropped=%llu oversize=%llu",
 		         c->cfg.rmgr_path, (unsigned long long)rtc_counter_get(&r->writes),
 		         (unsigned long long)rtc_counter_get(&k->lp_lines),
 		         (unsigned long long)rtc_counter_get(&k->lp_malformed),
 		         (unsigned long long)rtc_counter_get(&k->lp_bad_timestamp),
 		         (unsigned long long)rtc_counter_get(&k->lp_too_large),
+		         (unsigned long long)rtc_counter_get(&k->lp_uint_dropped),
+		         (unsigned long long)rtc_counter_get(&r->errors),
 		         (unsigned long long)(rtc_counter_get(&r->dropped) +
 		                              rtc_counter_get(&k->rmgr_drain_dropped)),
 		         (unsigned long long)rtc_counter_get(&r->oversize));

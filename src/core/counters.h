@@ -55,9 +55,10 @@ typedef struct {
 	rtc_counter lp_too_large; /* a line whose record exceeds max_record_bytes */
 	rtc_counter lp_uint_dropped;
 	rtc_counter rmgr_drain_dropped; /* writes overwritten before the drain read them */
-	/* Written by the main thread at start (before the collection thread
-	 * reads them) or by the rmgr thread, not the collection thread: */
-	rtc_counter rmgr_unavailable; /* 1: /dev/rtcollector could not be registered */
+	/* Written by the main thread at start or by an rmgr thread, never by
+	 * two at once (the collection thread only reads them): */
+	rtc_counter rmgr_unavailable;   /* 1: /dev/rtcollector could not be registered */
+	rtc_counter rmgr_thread_deaths; /* rmgr handler threads that exited on an error */
 } rtc_collect_counters;
 
 /* Written by one resource manager thread (/dev/rtcollector); one set per thread. */

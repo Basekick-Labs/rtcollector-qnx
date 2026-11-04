@@ -11,7 +11,7 @@ for f in rtcollector rtc_writer rtc_hog; do [ -x "$B/$f" ] || { echo "no $B/$f: 
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 printf 'interval: 1\nflush_interval: 1\nrmgr_mode: 0666\ninputs: [rmgr]\noutputs:\n  - stdout: {}\n' >"$B/rmgr.yml"
-printf 'interval: 1\nflush_interval: 1\nshutdown_timeout: 5\nrmgr_mode: 0666\nrmgr_buffer_bytes: 64KiB\ninputs: [rmgr]\noutputs:\n  - arc: {url: "http://10.0.2.2:9", timeout: 2}\n' >"$B/rmgr-down.yml"
+printf 'interval: 1\nflush_interval: 1\nshutdown_timeout: 5\nrmgr_mode: 0666\nrmgr_buffer_bytes: 8KiB\ninputs: [rmgr]\noutputs:\n  - arc: {url: "http://10.0.2.2:9", timeout: 2}\n' >"$B/rmgr-down.yml"
 printf 'interval: 1\nflush_interval: 1\nrmgr_path: /dev/rtc-nonroot\ninputs: [rmgr]\noutputs:\n  - stdout: {}\n' >"$B/rmgr-nr.yml"
 (cd "$B" && exec python3 -m http.server "$PORT" --bind 127.0.0.1) >/tmp/rtc-validate-http.log 2>&1 &
 HTTP=$!
@@ -35,6 +35,8 @@ old=$(echo "$mixed" | awk -v p="$past" '$1 >= p && $1 < p + 1000000000' | wc -l)
 fresh=$(echo "$mixed" | awk -v n="$now" '$1 >= n - 60000000000' | wc -l)
 [ "$old" -eq 10 ] && [ "$fresh" -eq 10 ] && ok "explicit and receive timestamps kept apart (10 + 10)" || bad "mixed timestamps: $old explicit, $fresh receive"
 
+out=$(SER "./rtc_writer -n 3 -m wblock -s wb; ./rtc_writer -n 3000 -s burst > /dev/null; sleep 2; grep -c '^wb,' /tmp/rm.out; grep -c '^burst,' /tmp/rm.out")
+[ "$(echo "$out" | grep -E '^[0-9]+$' | tr '\n' ' ')" = "3 3000 " ] && ok "writeblock() of 4096 bytes: 3/3 rows; burst of 3000 writes: 3000/3000 rows" || { bad "writeblock / burst"; echo "$out"; }
 st=$(SER "cat /dev/rtcollector; echo cat_rc=\$?")
 echo "$st" | grep -q '^rtcollector writes=' && echo "$st" | grep -q '^cat_rc=0' && [ "$(echo "$st" | grep -c '^rtcollector')" -eq 1 ] &&
 	ok "cat: one status line, EOF" || { bad "cat status"; echo "$st"; }
@@ -74,11 +76,12 @@ done
 echo "$out" | grep -q ' 63r RECEIVE' && ok "handler thread waits at its fixed priority 63" || { bad "handler priority"; echo "$out" | tail -3; }
 echo "$out" | grep -q 'max_writer_prio=50 ' && ok "status: highest writer priority 50" || bad "max_writer_prio"
 
-# Arc unreachable, small device buffer: the writer never errors, drops are
-# counted; shutdown does not hold writers for shutdown_timeout.
-out=$(SER "slay -s SIGKILL rtcollector >/dev/null 2>&1; sleep 0.5; ./rtcollector --config rmgr-down.yml > /tmp/down.out 2>&1 & P=\$!; sleep 1; ./rtc_writer -n 50000 -s flood; cat /dev/rtcollector; ./rtc_writer -n 40 -u 50000 -t -s late & W=\$!; sleep 0.5; kill \$P; wait \$W; echo w_rc=\$?; sleep 6; grep -c totals /tmp/down.out")
+# Arc unreachable, small device buffer, and the writer (priority 20, same
+# core) starving the collection thread (10): the writer never errors, drops
+# are counted; shutdown does not hold writers for shutdown_timeout.
+out=$(SER "slay -s SIGKILL rtcollector >/dev/null 2>&1; sleep 0.5; on -C 0 ./rtcollector --config rmgr-down.yml > /tmp/down.out 2>&1 & P=\$!; sleep 1; on -C 0 -p 20 ./rtc_writer -n 50000 -s flood; cat /dev/rtcollector; ./rtc_writer -n 40 -u 50000 -t -s late & W=\$!; sleep 0.5; kill \$P; wait \$W; echo w_rc=\$?; sleep 6; grep -c totals /tmp/down.out; grep totals /tmp/down.out")
 echo "$out" | grep -q '^writes=50000 failed=0' && ok "flood with Arc down: 50000 writes, none failed" || { bad "flood writes"; echo "$out"; }
-drop=$(echo "$out" | sed -n 's/^rtcollector .*dropped=\([0-9]*\).*/\1/p')
+drop=$(echo "$out" | sed -n 's/.*totals:.* dropped=\([0-9]*\).*/\1/p')
 [ "${drop:-0}" -gt 0 ] && ok "flood with Arc down: drops counted ($drop)" || bad "flood drops: ${drop:-?}"
 lmax=$(echo "$out" | sed -n 's/.*writes=40 failed=[0-9]* .*max_us=\([0-9.]*\).*/\1/p')
 awk -v m="${lmax:-99999999}" 'BEGIN{exit !(m < 1000000)}' && ok "shutdown with Arc down: writers fail at once (max write ${lmax} us), not after shutdown_timeout" || { bad "shutdown blocked writers: max ${lmax:-?} us"; echo "$out"; }

@@ -9,6 +9,9 @@
 #include "../../include/rtc_publish.h"
 
 #include <fcntl.h>
+#ifdef __QNX__
+#include <unix.h>
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +68,14 @@ int main(int argc, char **argv)
 			char line[128];
 			int len = snprintf(line, sizeof(line), "%s,mode=pwrite seq=%ldi\n", m, i);
 			rc = (int)pwrite(fd, line, (size_t)len, 12345);
+		} else if (!strcmp(mode, "wblock")) {
+			/* writeblock() sends a combine message (lseek + write). */
+			static char block[4096];
+			memset(block, ' ', sizeof(block));
+			int len = snprintf(block, sizeof(block), "%s,mode=wblock seq=%ldi", m, i);
+			block[len] = ' ';
+			block[sizeof(block) - 1] = '\n';
+			rc = writeblock(fd, sizeof(block), 0, 1, block) == 1 ? (int)sizeof(block) : -1;
 		} else if (!strcmp(mode, "big")) {
 			static char line[8192];
 			memset(line, 'x', sizeof(line));

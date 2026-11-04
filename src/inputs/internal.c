@@ -37,6 +37,7 @@ static int gather(rtc_collector *c)
 	F(&b, "processes_query_errors", &k->processes_query_errors);
 	F(&b, "priority_fallback", &k->priority_fallback);
 	F(&b, "rmgr_unavailable", &k->rmgr_unavailable);
+	F(&b, "rmgr_thread_deaths", &k->rmgr_thread_deaths);
 	rtc_rb_i64(&b, "buffer_bytes", clamp(c->ring.cap));
 	rtc_emit(c, &b);
 

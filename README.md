@@ -89,7 +89,7 @@ What a write costs and what it promises:
   priority (`rmgr_priority`, default 63): set it above every thread that
   writes. Measured on QEMU/KVM, all on one core: a priority-50 writer while a
   priority-5 writer floods and a priority-30 CPU hog runs: p99 about 10 µs,
-  worst 43 µs over 5 runs. (The Raspberry Pi measurement comes with the
+  worst 43 µs over 5 runs. If the handler threads cannot get `rmgr_priority` (above 63 needs root or `PROCMGR_AID_PRIORITY`), the device is refused rather than served with that promise broken. (The Raspberry Pi measurement comes with the
   jitter harness.)
 - Why a pool and a fixed priority, both learned on QNX 8: with priority
   inheritance, a low-priority writer's handler ran at that writer's priority
@@ -161,11 +161,11 @@ outputs:
 | `rmgr_path` | `/dev/rtcollector` | Path of the device (input `rmgr`) |
 | `rmgr_mode` | `0660` | Its permissions, octal. `0666` lets any user publish (and flood) |
 | `rmgr_group` | `0` | Its group id |
-| `rmgr_buffer_bytes` | `256KiB` | Buffer between the device and the collection thread, split among `rmgr_threads` |
+| `rmgr_buffer_bytes` | `256KiB` | Buffer between the device and the collection thread, per handler thread (memory = this × `rmgr_threads`) |
 | `rmgr_threads` | `4` | Handler threads for the device (1–16) |
 | `rmgr_priority` | `63` | Fixed priority of the device's handler threads: above every writer |
 | `max_write_bytes` | `4096` | Largest write accepted |
-| `rmgr_drain_bytes` | `64KiB` | Bytes converted per collection-thread step (every 20 ms at most) |
+| `rmgr_drain_bytes` | `64KiB` | Bytes converted per handler-thread buffer per collection-thread step (every 20 ms at most) |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |

@@ -18,13 +18,17 @@
  * reserved for it. With one thread every other writer then waits until the
  * preempted sender runs again (traced: a priority-5 writer preempted mid-send
  * by a priority-30 CPU hog held a priority-50 writer for 20-47 ms; with 4
- * threads the worst write was 44 us). The channel has a FIXED priority
+ * threads the worst write was 43 us). The channel has a FIXED priority
  * (rmgr_priority, default 63, meant to be above every writer): with priority
  * inheritance a low-priority writer's handler ran at that writer's priority
  * and anything in between could preempt it mid-handler.
  *
  * Opens and closes run on the same threads and allocate the per-open state
  * (iofunc defaults): open the device once, not per write.
+ *
+ * Each handler thread has a full rmgr_buffer_bytes ring: one writer's
+ * back-to-back writes mostly land on one thread, so splitting the buffer
+ * would cut every writer's burst room.
  *
  * Contract for writers (README): while the collector runs, a write waits for
  * at most a handler run per writer ahead of it, unless more than
@@ -76,15 +80,16 @@ static struct {
 	pthread_t thread[RTC_RMGR_MAX_THREADS];
 	unsigned started;
 	bool running;
-	volatile bool stopping;
+	_Atomic bool stopping;
 	_Atomic bool dead;   /* a dispatch thread exited on an error */
 	name_attach_t *lock; /* /dev/name/local/rtcollector<path>: one collector per path */
 	resmgr_connect_funcs_t connect_funcs;
 	resmgr_io_funcs_t io_funcs;
 	iofunc_attr_t attr;
-	char status[512];
-	int status_len;
+
 } st;
+
+static void destroy(rtc_collector *c);
 
 /* Which handler thread this is: its ring, scratch buffer and counters. */
 static _Thread_local unsigned self;
@@ -117,7 +122,10 @@ static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
 	if (nbytes > 0) {
 		/* The receive buffer is sized for the largest write, so the bytes
 		 * are normally already here: copy them rather than MsgRead. */
-		if (ctp->info.msglen >= 0 && (uint64_t)ctp->info.msglen >= off + nbytes) {
+		/* With a combine message (lseek + write, as writeblock sends) this
+		 * part starts at ctp->offset inside the receive buffer. */
+		if (ctp->info.msglen >= 0 &&
+		    (uint64_t)ctp->info.msglen >= (uint64_t)ctp->offset + off + nbytes) {
 			memcpy(scratch + 1, (const char *)msg + off, nbytes);
 		} else {
 			rtc_counter_add(&k->msgreads, 1);
@@ -138,8 +146,11 @@ static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
 	return _RESMGR_NPARTS(0);
 }
 
-/* `cat /dev/rtcollector`: one status line, then EOF. The snapshot is taken
- * at offset 0, so small reads continue the same line. */
+/* `cat /dev/rtcollector`: one status line, then EOF. Built per read in a
+ * local buffer and replied directly (no shared buffer between handler
+ * threads or readers). A reader using reads of at least 512 bytes, as cat
+ * does, gets one consistent line; smaller reads continue from the offset into
+ * a fresh snapshot. */
 static int io_read(resmgr_context_t *ctp, io_read_t *msg, RESMGR_OCB_T *ocb)
 {
 	int rc = iofunc_read_verify(ctp, msg, ocb, NULL);
@@ -147,42 +158,39 @@ static int io_read(resmgr_context_t *ctp, io_read_t *msg, RESMGR_OCB_T *ocb)
 		return rc;
 	if ((msg->i.xtype & _IO_XTYPE_MASK) != _IO_XTYPE_NONE)
 		return ENOSYS;
-	if (ocb->offset == 0) {
-		rtc_rmgr_counters k;
-		rtc_rmgr_sum(st.c, &k);
-		const rtc_collect_counters *q = &st.c->counters;
-		st.status_len = snprintf(
-		    st.status, sizeof(st.status),
-		    "rtcollector writes=%llu bytes=%llu dropped=%llu oversize=%llu lines=%llu malformed=%llu "
-		    "bad_timestamp=%llu too_large=%llu max_writer_prio=%llu rmgr_prio=%d threads=%u\n",
-		    (unsigned long long)rtc_counter_get(&k.writes),
-		    (unsigned long long)rtc_counter_get(&k.bytes),
-		    (unsigned long long)(rtc_counter_get(&k.dropped) +
-		                         rtc_counter_get(&q->rmgr_drain_dropped)),
-		    (unsigned long long)rtc_counter_get(&k.oversize),
-		    (unsigned long long)rtc_counter_get(&q->lp_lines),
-		    (unsigned long long)rtc_counter_get(&q->lp_malformed),
-		    (unsigned long long)rtc_counter_get(&q->lp_bad_timestamp),
-		    (unsigned long long)rtc_counter_get(&q->lp_too_large),
-		    (unsigned long long)rtc_counter_get(&k.max_prio_seen), st.c->cfg.rmgr_priority, st.n);
-		if (st.status_len < 0)
-			st.status_len = 0;
-		if ((size_t)st.status_len >= sizeof(st.status))
-			st.status_len = sizeof(st.status) - 1;
-	}
+	char line[512];
+	rtc_rmgr_counters k;
+	rtc_rmgr_sum(st.c, &k);
+	const rtc_collect_counters *q = &st.c->counters;
+	int len = snprintf(
+	    line, sizeof(line),
+	    "rtcollector writes=%llu bytes=%llu dropped=%llu oversize=%llu errors=%llu lines=%llu "
+	    "malformed=%llu "
+	    "bad_timestamp=%llu too_large=%llu uint_dropped=%llu max_writer_prio=%llu rmgr_prio=%d "
+	    "threads=%u\n",
+	    (unsigned long long)rtc_counter_get(&k.writes), (unsigned long long)rtc_counter_get(&k.bytes),
+	    (unsigned long long)(rtc_counter_get(&k.dropped) + rtc_counter_get(&q->rmgr_drain_dropped)),
+	    (unsigned long long)rtc_counter_get(&k.oversize), (unsigned long long)rtc_counter_get(&k.errors),
+	    (unsigned long long)rtc_counter_get(&q->lp_lines),
+	    (unsigned long long)rtc_counter_get(&q->lp_malformed),
+	    (unsigned long long)rtc_counter_get(&q->lp_bad_timestamp),
+	    (unsigned long long)rtc_counter_get(&q->lp_too_large),
+	    (unsigned long long)rtc_counter_get(&q->lp_uint_dropped),
+	    (unsigned long long)rtc_counter_get(&k.max_prio_seen), st.c->cfg.rmgr_priority, st.n);
+	if (len < 0)
+		len = 0;
+	if ((size_t)len >= sizeof(line))
+		len = sizeof(line) - 1;
 	off_t pos = ocb->offset;
 	size_t n = 0;
-	if (pos < st.status_len) {
-		n = (size_t)(st.status_len - pos);
+	if (pos < len) {
+		n = (size_t)(len - pos);
 		if (n > msg->i.nbytes)
 			n = msg->i.nbytes;
 		ocb->offset += (off_t)n;
 	}
-	_IO_SET_READ_NBYTES(ctp, n);
-	if (n == 0)
-		return _RESMGR_NPARTS(0);
-	SETIOV(ctp->iov, st.status + pos, n);
-	return _RESMGR_NPARTS(1);
+	MsgReply(ctp->rcvid, (long)n, line + (n ? pos : 0), n);
+	return _RESMGR_NOREPLY;
 }
 
 static int on_pulse(message_context_t *ctp, int code, unsigned flags, void *handle)
@@ -191,7 +199,7 @@ static int on_pulse(message_context_t *ctp, int code, unsigned flags, void *hand
 	(void)code;
 	(void)flags;
 	(void)handle;
-	st.stopping = true;
+	atomic_store(&st.stopping, true);
 	return 0;
 }
 
@@ -200,7 +208,7 @@ static void *dispatch_main(void *arg)
 	self = (unsigned)(uintptr_t)arg;
 	dispatch_context_t *ctp = dispatch_context_alloc(st.dpp);
 	int err = ctp ? 0 : errno;
-	while (ctp && !st.stopping) {
+	while (ctp && !atomic_load(&st.stopping)) {
 		dispatch_context_t *got = dispatch_block(ctp);
 		if (!got) {
 			if (errno == EINTR)
@@ -213,12 +221,14 @@ static void *dispatch_main(void *arg)
 	}
 	if (ctp)
 		dispatch_context_free(ctp);
-	if (!st.stopping && !atomic_exchange(&st.dead, true)) {
-		/* Died on an error: unregister so new opens fail, and say so.
-		 * stop() destroys the channel (writers then fail, not block). */
-		RTC_ERROR(C, "%s stopped on an error (%s)", st.c->cfg.rmgr_path, strerror(err));
-		rtc_counter_set(&st.c->counters.rmgr_unavailable, 1);
-		resmgr_detach(st.dpp, st.id, _RESMGR_DETACH_ALL);
+	if (!atomic_load(&st.stopping)) {
+		/* Died on an error. The other handler threads keep serving; this
+		 * thread's ring is still drained. Unregistering is left to stop()
+		 * (doing it here would race with teardown). */
+		atomic_store(&st.dead, true);
+		RTC_ERROR(C, "a %s handler thread stopped on an error (%s); the others keep serving",
+		          st.c->cfg.rmgr_path, strerror(err));
+		rtc_counter_add(&st.c->counters.rmgr_thread_deaths, 1);
 	}
 	return NULL;
 }
@@ -237,11 +247,12 @@ static int init(rtc_collector *c)
 	for (unsigned i = 0; i < st.n; i++) {
 		st.scratch[i] = malloc(st.max_write + 1);
 		if (!st.scratch[i] ||
-		    rtc_ring_init(&st.ring[i], c->cfg.rmgr_buffer_bytes / st.n, (uint32_t)st.max_write + 1,
-		                  1) != 0 ||
+		    rtc_ring_init(&st.ring[i], c->cfg.rmgr_buffer_bytes, (uint32_t)st.max_write + 1, 1) !=
+		        0 ||
 		    rtc_lp_drain_init(&st.drain[i], &st.ring[i], st.max_write, c->cfg.rmgr_drain_bytes) !=
 		        0) {
 			RTC_ERROR(C, "cannot allocate the %s buffers", c->cfg.rmgr_path);
+			destroy(c);
 			return -1; /* memory, not permission: the configuration cannot work */
 		}
 		memset(st.scratch[i], 0, st.max_write + 1); /* touch the pages now */
@@ -259,26 +270,33 @@ static void unavailable(rtc_collector *c, const char *why)
 /* Unregisters and destroys the channel: writers blocked on it fail now. */
 static void teardown(void)
 {
-	if (st.id != -1 && st.dpp && !atomic_load(&st.dead))
+	if (st.id != -1 && st.dpp)
 		resmgr_detach(st.dpp, st.id, _RESMGR_DETACH_ALL);
 	st.id = -1;
 	if (st.lock)
 		name_detach(st.lock, 0);
 	st.lock = NULL;
+	if (st.coid != -1)
+		ConnectDetach(st.coid);
+	st.coid = -1;
 	if (st.dpp)
-		dispatch_destroy(st.dpp);
+		dispatch_destroy(st.dpp); /* destroys the channel too */
+	else if (st.chid != -1)
+		ChannelDestroy(st.chid);
 	st.dpp = NULL;
+	st.chid = -1;
 }
 
 static void stop(rtc_collector *c)
 {
 	if (!st.running)
 		return;
-	/* Wake each dispatch thread with our own pulse, then destroy the
-	 * channel. If a pulse cannot be sent, destroying the channel first makes
+	/* Wake each dispatch thread with our own pulse (a thread that died
+	 * leaves its pulse queued, harmlessly), join, then destroy the channel.
+	 * If a pulse cannot be sent, destroying the channel first makes
 	 * dispatch_block fail, which ends the threads too. */
-	st.stopping = true;
-	bool pulsed = !atomic_load(&st.dead);
+	atomic_store(&st.stopping, true);
+	bool pulsed = true;
 	for (unsigned i = 0; pulsed && i < st.started; i++)
 		if (MsgSendPulse(st.coid, -1, st.pulse_code, 0) == -1) {
 			RTC_WARN(C, "cannot wake the %s threads (%s); destroying the channel",
@@ -362,6 +380,11 @@ static void start(rtc_collector *c)
 		teardown();
 		return;
 	}
+	/* Publish the rings before any handler can accept a write, so whatever
+	 * happens next, everything accepted is drained (or counted at stop). */
+	c->lp_drains = st.drain;
+	atomic_store(&c->lp_ndrains, st.n);
+	uint64_t fallbacks = rtc_counter_get(&c->counters.priority_fallback);
 	for (unsigned i = 0; i < st.n; i++) {
 		if (rtc_start_thread(c, &st.thread[i], dispatch_main, (void *)(uintptr_t)i,
 		                     c->cfg.rmgr_priority, "rmgr") != 0)
@@ -374,8 +397,14 @@ static void start(rtc_collector *c)
 		stop(c);
 		return;
 	}
-	c->lp_drains = st.drain;
-	atomic_store(&c->lp_ndrains, st.n); /* the collection thread converts from now on */
+	if (rtc_counter_get(&c->counters.priority_fallback) != fallbacks) {
+		/* Handlers below rmgr_priority bring the priority inversion back:
+		 * refuse rather than serve writers with a broken promise. */
+		unavailable(c,
+		            "its threads cannot run at rmgr_priority (above 63 needs PROCMGR_AID_PRIORITY)");
+		stop(c);
+		return;
+	}
 	RTC_INFO(C, "%s ready (mode %03o, group %d, %u threads at priority %d, max %zu bytes per write)",
 	         c->cfg.rmgr_path, c->cfg.rmgr_mode & 0777, c->cfg.rmgr_group, st.n, c->cfg.rmgr_priority,
 	         st.max_write);

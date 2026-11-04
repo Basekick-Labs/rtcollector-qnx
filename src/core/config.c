@@ -483,10 +483,8 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "max_write_bytes: must be from 64 to 64KiB");
 		bad++;
 	}
-	if (c->rmgr_threads == 0 ||
-	    c->rmgr_buffer_bytes / c->rmgr_threads < RTC_RING_HDR + c->max_write_bytes + 1) {
-		RTC_ERROR(C, "rmgr_buffer_bytes: each of the rmgr_threads buffers must hold one write of "
-		             "max_write_bytes");
+	if (c->rmgr_buffer_bytes < RTC_RING_HDR + c->max_write_bytes + 1) {
+		RTC_ERROR(C, "rmgr_buffer_bytes: must hold at least one write of max_write_bytes");
 		bad++;
 	}
 	if (c->rmgr_drain_bytes < c->max_write_bytes + 1 || c->rmgr_drain_bytes > (16u << 20)) {

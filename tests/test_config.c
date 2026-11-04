@@ -115,7 +115,6 @@ static void invalid_values_are_refused(void)
 	    "rmgr_path: dev/x\noutputs: [stdout]\n",
 	    "rmgr_threads: 0\noutputs: [stdout]\n",
 	    "rmgr_threads: 17\noutputs: [stdout]\n",
-	    "rmgr_threads: 16\nrmgr_buffer_bytes: 64KiB\noutputs: [stdout]\n",
 	    "max_processes: 0\noutputs: [stdout]\n",
 	};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {

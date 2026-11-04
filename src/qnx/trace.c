@@ -124,6 +124,7 @@ static struct {
 	tracelog_instance_t *in;
 	pthread_t tracer, rotator, monitor, parser;
 	bool session, monitor_running, parser_running;
+	bool parser_stuck; /* stop() gave up waiting for it: its tables stay allocated */
 	_Atomic bool stop_rotator, stopping;
 	_Atomic bool session_ending; /* session_stop() is stopping the tracer */
 
@@ -137,11 +138,19 @@ static struct {
 	bool hdr_done;
 	unsigned seq;
 	char path[PATH_MAX_T];
+	/* Continuity: a file whose events do not follow the previous file's
+	 * (first of a session, or bytes were lost before it) makes the parser
+	 * forget every pending READY/RUNNING, or the gap reads as latency. */
+	bool cur_discont; /* the current file starts after a gap */
+	bool truncated;   /* the current file lost bytes: the next one starts after a gap */
 
 	/* parse queue (rotator -> parser) */
 	pthread_mutex_t qmu;
 	pthread_cond_t qcv;
-	char queue[QUEUE][PATH_MAX_T];
+	struct {
+		char path[PATH_MAX_T];
+		bool discont;
+	} queue[QUEUE];
 	unsigned qn;
 
 	/* parser state and the published interval */
@@ -188,15 +197,17 @@ static ssize_t on_write(void *cookie, const char *data, size_t sz)
 		}
 	}
 	ssize_t r = (ssize_t)sz;
-	if (st.fd >= 0 && st.file_bytes + sz <= st.c->cfg.trace_max_bytes) {
-		if (write(st.fd, data, sz) == (ssize_t)sz) {
-			st.file_bytes += sz;
-			rtc_counter_add(&st.k.bytes, sz);
-		} else {
-			rtc_counter_add(&st.k.bytes_dropped, sz);
-		}
+	if (st.fd >= 0 && st.file_bytes + sz <= st.c->cfg.trace_max_bytes &&
+	    write(st.fd, data, sz) == (ssize_t)sz) {
+		st.file_bytes += sz;
+		rtc_counter_add(&st.k.bytes, sz);
 	} else {
-		rtc_counter_add(&st.k.bytes_dropped, sz); /* over trace_max_bytes this interval */
+		/* Over trace_max_bytes, or the write failed (/dev/shmem full): the
+		 * rest of this interval is dropped too, so the file stays a
+		 * continuous run of events and the gap is at its end. */
+		rtc_counter_add(&st.k.bytes_dropped, sz);
+		st.file_bytes = st.c->cfg.trace_max_bytes;
+		st.truncated = true;
 	}
 	pthread_mutex_unlock(&st.fmu);
 	return r; /* tell libtracelog it was consumed either way */
@@ -211,16 +222,18 @@ static int open_next(void)
 }
 
 /* Hands the finished file to the parser; drops the oldest if it is behind. */
-static void enqueue(const char *path)
+static void enqueue(const char *path, bool discont)
 {
 	pthread_mutex_lock(&st.qmu);
 	if (st.qn == QUEUE) {
-		unlink(st.queue[0]);
-		memmove(st.queue[0], st.queue[1], sizeof(st.queue[0]) * (QUEUE - 1));
+		unlink(st.queue[0].path);
+		memmove(&st.queue[0], &st.queue[1], sizeof(st.queue[0]) * (QUEUE - 1));
 		st.qn--;
+		st.queue[0].discont = true; /* it no longer follows what was parsed */
 		rtc_counter_add(&st.k.files_dropped, 1);
 	}
-	snprintf(st.queue[st.qn++], PATH_MAX_T, "%s", path);
+	snprintf(st.queue[st.qn].path, PATH_MAX_T, "%s", path);
+	st.queue[st.qn++].discont = discont;
 	pthread_cond_signal(&st.qcv);
 	pthread_mutex_unlock(&st.qmu);
 }
@@ -232,9 +245,11 @@ static void rotate(bool start_next)
 	if (st.fd >= 0) {
 		close(st.fd);
 		st.fd = -1;
-		enqueue(st.path);
+		enqueue(st.path, st.cur_discont);
 		rtc_counter_add(&st.k.intervals, 1);
 	}
+	st.cur_discont = st.truncated;
+	st.truncated = false;
 	if (start_next && open_next() >= 0 && st.hdr_done) {
 		if (write(st.fd, st.hdr, st.hdr_len) != (ssize_t)st.hdr_len) {
 			close(st.fd);
@@ -301,13 +316,39 @@ static void *tracer_main(void *arg)
 	return NULL;
 }
 
+/* A session that cannot start is not retried (nothing would call
+ * session_start again before another tracer comes and goes): tracing is
+ * off until a restart, and the counters say so. */
+static void unavailable(void)
+{
+	rtc_counter_set(&st.k.unavailable, 1);
+	rtc_counter_set(&st.c->counters.trace_unavailable, 1);
+}
+
+/* Removes the current file unparsed (a session that could not start). */
+static void discard_current(void)
+{
+	pthread_mutex_lock(&st.fmu);
+	if (st.fd >= 0) {
+		close(st.fd);
+		st.fd = -1;
+		unlink(st.path);
+	}
+	pthread_mutex_unlock(&st.fmu);
+}
+
 /* Called with smu held. */
 static void session_start(void)
 {
 	if (st.session)
 		return;
 	if (tracelog_instance_init(&st.in) != 0 || tracelog_setwriter(st.in, on_write, NULL, NULL) != 0) {
-		RTC_WARN(C, "cannot set up the trace logger");
+		RTC_WARN(C, "cannot set up the trace logger; tracing disabled");
+		if (st.in) {
+			tracelog_instance_destroy(st.in);
+			st.in = NULL;
+		}
+		unavailable();
 		return;
 	}
 	/* Only what the rows need; the filter is global, so set it every time. */
@@ -319,16 +360,32 @@ static void session_start(void)
 	pthread_mutex_lock(&st.fmu);
 	st.hdr_len = 0;
 	st.hdr_done = false;
+	st.cur_discont = true; /* nothing seen while we were not tracing */
+	st.truncated = false;
 	open_next();
 	pthread_mutex_unlock(&st.fmu);
 	atomic_store(&st.stop_rotator, false);
 	atomic_store(&st.session_ending, false);
 	if (rtc_start_thread(st.c, &st.tracer, tracer_main, NULL, st.c->cfg.trace_priority, "trace") != 0) {
+		RTC_WARN(C, "cannot start the trace thread; tracing disabled");
 		tracelog_instance_destroy(st.in);
 		st.in = NULL;
+		discard_current();
+		unavailable();
 		return;
 	}
-	rtc_start_thread(st.c, &st.rotator, rotator_main, NULL, st.c->cfg.trace_priority, "trace rotator");
+	if (rtc_start_thread(st.c, &st.rotator, rotator_main, NULL, st.c->cfg.trace_priority,
+	                     "trace rotator") != 0) {
+		RTC_WARN(C, "cannot start the trace rotator thread; tracing disabled");
+		atomic_store(&st.session_ending, true);
+		tracelog_stop(st.in);
+		pthread_join(st.tracer, NULL);
+		tracelog_instance_destroy(st.in);
+		st.in = NULL;
+		discard_current();
+		unavailable();
+		return;
+	}
 	st.session = true;
 	rtc_counter_add(&st.k.sessions, 1);
 }
@@ -345,7 +402,7 @@ static void session_stop(void)
 	pthread_join(st.tracer, NULL);
 	tracelog_instance_destroy(st.in);
 	st.in = NULL;
-	rotate(false); /* the partial interval is parsed too */
+	rotate(false); /* on a yield the partial interval is parsed; at shutdown it is dropped */
 	st.session = false;
 }
 
@@ -364,6 +421,8 @@ static void on_monitor(int acquired)
 static void *monitor_main(void *arg)
 {
 	(void)arg;
+	if (atomic_load(&st.stopping))
+		return NULL;
 	int rc = tracelog_monitor(on_monitor);
 	if (rc != 0 && rc != EINTR && !atomic_load(&st.stopping)) {
 		/* EEXIST: another process holds the monitor (a second collector).
@@ -402,6 +461,8 @@ static uint64_t event_ns(struct traceparser_state *s)
 
 static int cb_thread(struct traceparser_state *s, void *u, unsigned h, unsigned t, unsigned *b, unsigned l)
 {
+	if (atomic_load(&st.stopping))
+		return 0; /* shutting down: let the parse run out fast */
 	(void)u;
 	(void)t;
 	if (l < 2)
@@ -427,6 +488,8 @@ static int cb_thread(struct traceparser_state *s, void *u, unsigned h, unsigned 
 /* Registered with the external codes; the callback sees the internal ones. */
 static int cb_names(struct traceparser_state *s, void *u, unsigned h, unsigned t, unsigned *b, unsigned l)
 {
+	if (atomic_load(&st.stopping))
+		return 0; /* shutting down: let the parse run out fast */
 	(void)s;
 	(void)u;
 	(void)t;
@@ -448,6 +511,8 @@ static int cb_names(struct traceparser_state *s, void *u, unsigned h, unsigned t
 
 static int cb_int(struct traceparser_state *s, void *u, unsigned h, unsigned t, unsigned *b, unsigned l)
 {
+	if (atomic_load(&st.stopping))
+		return 0; /* shutting down: let the parse run out fast */
 	(void)s;
 	(void)u;
 	(void)t;
@@ -458,6 +523,8 @@ static int cb_int(struct traceparser_state *s, void *u, unsigned h, unsigned t, 
 
 static int cb_control(struct traceparser_state *s, void *u, unsigned h, unsigned t, unsigned *b, unsigned l)
 {
+	if (atomic_load(&st.stopping))
+		return 0; /* shutting down: let the parse run out fast */
 	(void)s;
 	(void)u;
 	(void)t;
@@ -468,7 +535,7 @@ static int cb_control(struct traceparser_state *s, void *u, unsigned h, unsigned
 	return 0;
 }
 
-static void parse_file(const char *path)
+static void parse_file(const char *path, bool discont)
 {
 	struct traceparser_state *s = traceparser_init(NULL);
 	if (!s) {
@@ -481,6 +548,8 @@ static void parse_file(const char *path)
 	traceparser_cs(s, NULL, cb_names, _NTO_TRACE_PROCESS, _NTO_TRACE_PROCCREATE_NAME);
 	traceparser_cs_range(s, NULL, cb_int, _NTO_TRACE_INT, _NTO_TRACE_INTFIRST, _NTO_TRACE_INTLAST);
 	traceparser_cs(s, NULL, cb_control, _NTO_TRACE_CONTROL, _NTO_TRACE_CONTROLDROPPED);
+	if (discont)
+		rtc_sched_dropped(&st.sched, 0); /* the gap is counted where it happened */
 	uint64_t before = st.sched.events;
 	struct timespec a, z;
 	clock_gettime(CLOCK_MONOTONIC, &a);
@@ -494,6 +563,8 @@ static void parse_file(const char *path)
 	rtc_counter_set(&st.k.threads_overflow, st.sched.threads_overflow);
 	rtc_counter_set(&st.k.out_of_order, st.sched.out_of_order);
 
+	if (atomic_load(&st.stopping))
+		return;
 	/* Publish this interval. */
 	rtc_sched_take(&st.sched, st.ncpu, st.c->cfg.trace_min_priority, st.c->cfg.trace_top,
 	               &st.snap[st.back]);
@@ -514,15 +585,20 @@ static void *parser_main(void *arg)
 		pthread_mutex_lock(&st.qmu);
 		while (st.qn == 0 && !atomic_load(&st.stopping))
 			pthread_cond_wait(&st.qcv, &st.qmu);
-		if (st.qn == 0) {
+		if (atomic_load(&st.stopping)) {
+			/* Shutdown: what is queued is not parsed (gather has stopped). */
+			for (unsigned i = 0; i < st.qn; i++)
+				unlink(st.queue[i].path);
+			st.qn = 0;
 			pthread_mutex_unlock(&st.qmu);
 			break;
 		}
-		snprintf(path, sizeof(path), "%s", st.queue[0]);
-		memmove(st.queue[0], st.queue[1], sizeof(st.queue[0]) * (QUEUE - 1));
+		snprintf(path, sizeof(path), "%s", st.queue[0].path);
+		bool discont = st.queue[0].discont;
+		memmove(&st.queue[0], &st.queue[1], sizeof(st.queue[0]) * (QUEUE - 1));
 		st.qn--;
 		pthread_mutex_unlock(&st.qmu);
-		parse_file(path);
+		parse_file(path, discont);
 		unlink(path);
 	}
 	return NULL;
@@ -562,11 +638,37 @@ static void start(rtc_collector *c)
 	}
 	/* The parser runs below everything else of ours. */
 	int prio = c->cfg.send_priority > 1 ? c->cfg.send_priority - 1 : 1;
-	if (rtc_start_thread(c, &st.parser, parser_main, NULL, prio, "trace parser") != 0)
+	if (rtc_start_thread(c, &st.parser, parser_main, NULL, prio, "trace parser") != 0) {
+		RTC_WARN(C,
+		         "cannot start the trace parser thread; the collector runs without kernel tracing");
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&c->counters.trace_unavailable, 1);
 		return;
+	}
 	st.parser_running = true;
-	if (rtc_start_thread(c, &st.monitor, monitor_main, NULL, c->cfg.trace_priority, "trace monitor") == 0)
+	if (rtc_start_thread(c, &st.monitor, monitor_main, NULL, c->cfg.trace_priority, "trace monitor") ==
+	    0) {
 		st.monitor_running = true;
+	} else {
+		RTC_WARN(C,
+		         "cannot start the trace monitor thread; the collector runs without kernel tracing");
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&c->counters.trace_unavailable, 1);
+	}
+}
+
+/* pthread_join with a deadline; false if the thread is still running. */
+static bool join_within(pthread_t t, unsigned ms)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ts.tv_sec += ms / 1000;
+	ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+	return pthread_timedjoin_monotonic(t, NULL, &ts) == 0;
 }
 
 static void stop(rtc_collector *c)
@@ -574,9 +676,15 @@ static void stop(rtc_collector *c)
 	(void)c;
 	atomic_store(&st.stopping, true);
 	if (st.monitor_running) {
-		tracelog_monitor_stop();
-		pthread_join(st.monitor, NULL);
-		st.monitor_running = false;
+		/* tracelog_monitor_stop only reaches a monitor already waiting: if
+		 * the thread has not got there yet, ask again until it has gone. */
+		for (unsigned i = 0; i < 50 && st.monitor_running; i++) {
+			tracelog_monitor_stop();
+			if (join_within(st.monitor, 100))
+				st.monitor_running = false;
+		}
+		if (st.monitor_running)
+			RTC_WARN(C, "the trace monitor did not stop within 5 s; leaving it");
 	}
 	pthread_mutex_lock(&st.smu);
 	session_stop();
@@ -585,13 +693,19 @@ static void stop(rtc_collector *c)
 		pthread_mutex_lock(&st.qmu);
 		pthread_cond_signal(&st.qcv);
 		pthread_mutex_unlock(&st.qmu);
-		pthread_join(st.parser, NULL);
-		st.parser_running = false;
+		/* Bounded: the callbacks are no-ops now, but a parse runs at the
+		 * lowest priority and busy real-time threads can hold it off. */
+		if (join_within(st.parser, 2000)) {
+			st.parser_running = false;
+		} else {
+			st.parser_stuck = true;
+			RTC_WARN(C, "the trace parser did not stop within 2 s; leaving it");
+		}
 	}
 	/* Files the parser did not get to. */
 	pthread_mutex_lock(&st.qmu);
 	for (unsigned i = 0; i < st.qn; i++)
-		unlink(st.queue[i]);
+		unlink(st.queue[i].path);
 	st.qn = 0;
 	pthread_mutex_unlock(&st.qmu);
 }
@@ -599,6 +713,8 @@ static void stop(rtc_collector *c)
 static void destroy(rtc_collector *c)
 {
 	(void)c;
+	if (st.parser_stuck)
+		return; /* it may still be reading them; the process is exiting */
 	rtc_sched_free(&st.sched);
 	rtc_sched_snapshot_free(&st.snap[0]);
 	rtc_sched_snapshot_free(&st.snap[1]);

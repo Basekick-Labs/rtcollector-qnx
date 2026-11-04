@@ -11,6 +11,7 @@ for f in rtcollector rtc_writer rtc_hog; do [ -x "$B/$f" ] || { echo "no $B/$f: 
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 printf 'interval: 2\nflush_interval: 2\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace.yml"
+printf 'interval: 2\nflush_interval: 2\ntrace_max_bytes: 64MiB\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-big.yml"
 printf 'interval: 2\nflush_interval: 2\ninputs: [trace, rmgr]\noutputs:\n  - stdout: {}\n' >"$B/trace-rmgr.yml"
 printf 'interval: 1\nflush_interval: 1\ntrace_interval: 3\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-slow.yml"
 printf 'interval: 2\nflush_interval: 2\ntrace_max_bytes: 64KiB\ntrace_max_threads: 16\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-small.yml"
@@ -21,7 +22,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do curl -fsS -o /dev/null "http://127.0.0.1:$PORT
 # A copy that looks for a libtracelog that is not there: an image without it.
 python3 -I -c 'import sys; d=open(sys.argv[1],"rb").read(); assert d.count(b"libtracelog.so.1\0")==1; open(sys.argv[2],"wb").write(d.replace(b"libtracelog.so.1\0", b"libtracelog.so.9\0"))' "$B/rtcollector" "$B/rtcollector-nolib" || { echo "cannot patch the library name"; exit 2; }
 want=$(cksum <"$B/rtcollector" | awk '{print $1}')
-got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-slow.yml trace-rmgr.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
+got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-slow.yml trace-rmgr.yml trace-big.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && ok "deployed (cksum $want)" || { bad "deploy: cksum $got vs $want"; exit 1; }
 
 # Known workload on CPU 1: prio-30 hog 5 ms busy / 5 ms idle, prio-40 thread
@@ -42,16 +43,20 @@ mx=$(echo "$out" | grep '^sched' | sed -n 's/.*latency_max_ns=\([0-9]*\)i.*/\1/p
 [ "$(echo "$out" | tail -1)" = "0" ] && ok "no trace files left in /dev/shmem" || bad "trace files left: $(echo "$out" | tail -1)"
 
 # Another tracer: tracelogger asks for the trace; we yield, it succeeds, we resume.
-out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/ty.out 2>&1 & P=\$!; sleep 2; tracelogger -s 1 -f /dev/shmem/ext.kev > /dev/null 2>&1; echo tl_rc=\$?; ls -la /dev/shmem/ext.kev | awk '{print \"ext_bytes=\" \$5}'; rm -f /dev/shmem/ext.kev; sleep 4; kill \$P; sleep 1; grep ^internal_trace /tmp/ty.out | tail -1")
+out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/ty.out 2>&1 & P=\$!; on -C 1 -p 30 ./rtc_hog -b 5 -s 5 -t 9 & on -C 1 -p 20 ./rtc_hog -b 1 -s 1 -t 9 & sleep 2; tracelogger -s 1 -f /dev/shmem/ext.kev > /dev/null 2>&1; echo tl_rc=\$?; ls -la /dev/shmem/ext.kev | awk '{print \"ext_bytes=\" \$5}'; rm -f /dev/shmem/ext.kev; sleep 4; kill \$P; sleep 1; grep ^internal_trace /tmp/ty.out | tail -1; grep '^sched' /tmp/ty.out | sed -n 's/.*latency_max_ns=\\([0-9]*\\)i.*/\\1/p' | sort -n | tail -1")
 echo "$out" | grep -q 'tl_rc=0' && ok "external tracelogger ran while the collector traced (it yielded)" || { bad "external tracelogger"; echo "$out"; }
 y=$(field "$(echo "$out" | grep ^internal_trace)" yielded); s=$(field "$(echo "$out" | grep ^internal_trace)" sessions)
 [ "${y:-0}" -ge 1 ] && [ "${s:-0}" -ge 2 ] && ok "yielded $y, resumed (sessions $s)" || bad "yield/resume: yielded=${y:-?} sessions=${s:-?}"
+mx=$(echo "$out" | tail -1)
+[ "${mx:-0}" -lt 500000000 ] && ok "the yield gap is not a latency (max ${mx} ns)" || bad "latency across the yield: $mx"
 
 # Bounds: 64 KiB per interval and a 16-thread table, under a busy system.
-out=$(SER "cd /tmp; ./rtcollector --config trace-small.yml > /tmp/ts.out 2>&1 & P=\$!; sleep 1; for i in 1 2 3 4 5 6 7 8; do ./rtc_hog -b 1 -s 1 -t 3 & done; sleep 4; kill \$P; sleep 1; grep ^internal_trace /tmp/ts.out | tail -1")
+out=$(SER "cd /tmp; ./rtcollector --config trace-small.yml > /tmp/ts.out 2>&1 & P=\$!; sleep 1; for i in 1 2 3 4 5 6 7 8; do ./rtc_hog -b 1 -s 1 -t 3 & done; sleep 4; kill \$P; sleep 1; grep ^internal_trace /tmp/ts.out | tail -1; grep '^sched' /tmp/ts.out | sed -n 's/.*latency_max_ns=\\([0-9]*\\)i.*/\\1/p' | sort -n | tail -1")
 bd=$(field "$out" bytes_dropped); to=$(field "$out" threads_overflow)
 [ "${bd:-0}" -gt 0 ] && ok "byte cap: bytes_dropped=$bd" || bad "byte cap: bytes_dropped=${bd:-?}"
 [ "${to:-0}" -gt 0 ] && ok "thread table bound: threads_overflow=$to" || bad "threads_overflow=${to:-?}"
+mx=$(echo "$out" | tail -1)
+[ "${mx:-0}" -lt 500000000 ] && ok "bytes dropped at the cap are not a latency (max ${mx} ns)" || bad "latency across the cap: $mx"
 
 # trace_interval longer than interval (non-default): one set of rows per
 # trace interval, none repeated in the rounds between, none lost.
@@ -65,12 +70,18 @@ out=$(SER "cd /tmp; ./rtcollector --config trace-rmgr.yml > /tmp/trm.out 2>&1 & 
 nb=$(echo "$out" | grep -E '^[0-9]+$' | tail -2 | head -1); nh=$(echo "$out" | grep -E '^[0-9]+$' | tail -1)
 [ "$nb" = "200" ] && [ "${nh:-0}" -ge 1 ] && ok "trace + rmgr: 200/200 published lines, device threads in sched rows" || { bad "trace + rmgr: lines=$nb handler rows=$nh"; echo "$out" | tail -3; }
 
+# Unpinned: wakers and wakees on different CPUs, whose kernel buffers reach
+# the file in any order. Out-of-order events stay rare and no false latency.
+out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/tu.out 2>&1 & sleep 1; for i in 1 2 3 4 5 6; do on -p 20 ./rtc_hog -b 1 -s 1 -t 6 & done; on -p 30 ./rtc_hog -b 3 -s 2 -t 6 & sleep 7; slay -f rtcollector; sleep 1; grep ^internal_trace /tmp/tu.out | tail -1; grep '^sched' /tmp/tu.out | sed -n 's/.*latency_max_ns=\\([0-9]*\\)i.*/\\1/p' | sort -n | tail -1")
+ev=$(field "$(echo "$out" | grep ^internal_trace)" events); oo=$(field "$(echo "$out" | grep ^internal_trace)" out_of_order); mx=$(echo "$out" | tail -1)
+[ "${ev:-0}" -gt 0 ] && [ $(( ${oo:-0} * 100 )) -lt "$ev" ] && [ "${mx:-0}" -lt 100000000 ] && ok "unpinned: out_of_order ${oo}/${ev} events, max latency ${mx} ns" || { bad "unpinned: out_of_order=${oo:-?} events=${ev:-?} max=${mx:-?}"; }
+
 # Starvation: four prio-30 hogs, one per CPU, above the logger (15): the
 # kernel drops events; they are counted and no garbage latency comes out.
 out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/tdrop.out 2>&1 & P=\$!; sleep 1; for c in 0 1 2 3; do on -C \$c -p 30 ./rtc_hog -b 2500 -s 1 -t 3 & done; sleep 5; kill \$P; sleep 2; grep ^internal_trace /tmp/tdrop.out | tail -1; grep '^sched' /tmp/tdrop.out | sed -n 's/.*latency_max_ns=\([0-9]*\)i.*/\1/p' | sort -n | tail -1")
 kd=$(field "$(echo "$out" | grep ^internal_trace)" kernel_dropped); mx=$(echo "$out" | tail -1)
 [ "${kd:-0}" -gt 0 ] && ok "starved logger: kernel drops counted ($kd)" || bad "kernel_dropped=${kd:-?} (expected drops)"
-[ "${mx:-0}" -lt 3000000000 ] && ok "after drops: no garbage latency (max ${mx} ns)" || bad "garbage latency after drops: $mx"
+[ "${mx:-0}" -lt 500000000 ] && ok "after drops: no garbage latency (max ${mx} ns)" || bad "garbage latency after drops: $mx"
 
 # Non-root: unavailable, counted, collector runs.
 out=$(SER "cd /tmp; on -u rtuser ./rtcollector --config trace.yml > /tmp/tn.out 2>&1 & sleep 3; slay -f rtcollector; sleep 1; grep 'needs root or PROCMGR_AID_TRACE' /tmp/tn.out; grep ^internal_trace /tmp/tn.out | tail -1")
@@ -93,8 +104,16 @@ out=$(SER "cd /tmp; ./rtcollector-nolib --config trace.yml > /tmp/tl.out 2>&1 & 
 echo "$out" | grep -q 'cannot load libtracelog.so.9' && echo "$out" | grep -q '^internal_trace.*unavailable=1i' && [ "$(echo "$out" | tail -1)" -ge 1 ] && ok "no libtracelog: collector runs, trace unavailable" || { bad "no libtracelog"; echo "$out"; }
 
 # kill -9 leaves the trace facility usable.
-out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /dev/null 2>&1 & P=\$!; sleep 2; kill -9 \$P; sleep 1; tracelogger -s 1 -f /dev/shmem/ext.kev > /dev/null 2>&1; echo tl_rc=\$?; rm -f /dev/shmem/ext.kev /dev/shmem/rtcollector-trace-*")
+# Its files are removed by the next collector's start.
+out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /dev/null 2>&1 & P=\$!; sleep 2; kill -9 \$P; sleep 1; tracelogger -s 1 -f /dev/shmem/ext.kev > /dev/null 2>&1; echo tl_rc=\$?; rm -f /dev/shmem/ext.kev; echo left=\$(ls /dev/shmem | grep -c rtcollector-trace); ./rtcollector --config trace.yml > /tmp/tk.out 2>&1 & sleep 2; slay -f rtcollector; sleep 1; grep -c 'trace files left by collectors' /tmp/tk.out; ls /dev/shmem | grep -c rtcollector-trace")
 echo "$out" | grep -q 'tl_rc=0' && ok "after kill -9: tracelogger works" || { bad "after kill -9"; echo "$out"; }
+echo "$out" | grep -qE 'left=[1-9]' && [ "$(echo "$out" | grep -E '^[0-9]+$' | tail -2 | head -1)" = "1" ] && [ "$(echo "$out" | tail -1)" = "0" ] && ok "after kill -9: the next start removes the files left behind" || { bad "stale files after kill -9"; echo "$out" | tail -4; }
+
+# Shutdown is bounded with the parser (priority 8) starved: busy threads at 9 on
+# every CPU and full 64 MiB files queued, then SIGTERM.
+out=$(SER "cd /tmp; ./rtcollector --config trace-big.yml > /tmp/tb.out 2>&1 & P=\$!; for c in 0 1 2 3; do on -C \$c -p 9 ./rtc_hog -b 1000 -s 1 -t 40 & done; sleep 8; t0=\$(date +%s); kill \$P; while kill -0 \$P 2>/dev/null; do sleep 0.2; done; echo took=\$(( \$(date +%s) - t0 )); slay -f rtc_hog; sleep 1; ls /dev/shmem | grep -c rtcollector-trace")
+tk=$(echo "$out" | sed -n 's/^took=\([0-9]*\)/\1/p' | tail -1)
+[ -n "$tk" ] && [ "$tk" -le 10 ] && ok "SIGTERM with a starved parser: exited in ${tk} s" || { bad "shutdown took ${tk:-?} s"; echo "$out" | tail -3; }
 
 left=$(SER "pidin -p rtcollector -f a | grep -c rtcollector" | grep -E '^[0-9]+$' | tail -1)
 [ "${left:-0}" -eq 0 ] && ok "no collector left running" || { bad "collectors left: $left"; SER "slay -f -s SIGKILL rtcollector"; }

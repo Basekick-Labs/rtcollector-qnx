@@ -17,8 +17,10 @@ printf 'interval: 2\nflush_interval: 2\ntrace_max_bytes: 64KiB\ntrace_max_thread
 HTTP=$!
 trap 'kill $HTTP 2>/dev/null || true' EXIT
 for _ in 1 2 3 4 5 6 7 8 9 10; do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/trace.yml" 2>/dev/null && break; sleep 0.3; done
+# A copy that looks for a libtracelog that is not there: an image without it.
+python3 -I -c 'import sys; d=open(sys.argv[1],"rb").read(); assert d.count(b"libtracelog.so.1\0")==1; open(sys.argv[2],"wb").write(d.replace(b"libtracelog.so.1\0", b"libtracelog.so.9\0"))' "$B/rtcollector" "$B/rtcollector-nolib" || { echo "cannot patch the library name"; exit 2; }
 want=$(cksum <"$B/rtcollector" | awk '{print $1}')
-got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtc_writer rtc_hog trace.yml trace-small.yml trace-slow.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
+got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-slow.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && ok "deployed (cksum $want)" || { bad "deploy: cksum $got vs $want"; exit 1; }
 
 # Known workload on CPU 1: prio-30 hog 5 ms busy / 5 ms idle, prio-40 thread
@@ -76,6 +78,10 @@ echo "$out" | grep -q '^internal_trace.*sessions=0i' && [ "$(echo "$out" | tail 
 # A second collector cannot get the trace monitor: it says so and counts it.
 out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /dev/null 2>&1 & sleep 1; ./rtcollector --config trace.yml > /tmp/t2.out 2>&1 & sleep 3; slay -f rtcollector; sleep 1; grep 'tracing disabled' /tmp/t2.out; grep ^internal_trace /tmp/t2.out | tail -1; ls /dev/shmem | grep -c rtcollector-trace")
 echo "$out" | grep -q 'another process monitors' && echo "$out" | grep -q '^internal_trace.*unavailable=1i' && [ "$(echo "$out" | tail -1)" = "0" ] && ok "second collector: tracing disabled, counted, no files left" || { bad "second collector"; echo "$out"; }
+
+# No libtracelog on the image: the collector runs, the input says why.
+out=$(SER "cd /tmp; ./rtcollector-nolib --config trace.yml > /tmp/tl.out 2>&1 & sleep 3; slay -f rtcollector-nolib; sleep 1; grep 'cannot load libtracelog' /tmp/tl.out; grep ^internal_trace /tmp/tl.out | tail -1; grep -c ^internal_collector /tmp/tl.out")
+echo "$out" | grep -q 'cannot load libtracelog.so.9' && echo "$out" | grep -q '^internal_trace.*unavailable=1i' && [ "$(echo "$out" | tail -1)" -ge 1 ] && ok "no libtracelog: collector runs, trace unavailable" || { bad "no libtracelog"; echo "$out"; }
 
 # kill -9 leaves the trace facility usable.
 out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /dev/null 2>&1 & P=\$!; sleep 2; kill -9 \$P; sleep 1; tracelogger -s 1 -f /dev/shmem/ext.kev > /dev/null 2>&1; echo tl_rc=\$?; rm -f /dev/shmem/ext.kev /dev/shmem/rtcollector-trace-*")

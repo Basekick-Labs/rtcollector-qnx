@@ -33,6 +33,7 @@
 #include "../core/log.h"
 #include "../core/sched.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -48,6 +49,52 @@
 #include <sys/traceparser.h>
 #include <time.h>
 #include <unistd.h>
+
+/* libtracelog ships only as a shared library. It is loaded when the input
+ * starts, not linked: an image without it must still run the collector, with
+ * this input unavailable. The macros send the calls below through it. */
+static struct {
+	int (*instance_init)(tracelog_instance_t **);
+	int (*instance_destroy)(tracelog_instance_t *);
+	int (*setwriter)(tracelog_instance_t *, tracelog_write_t, tracelog_writev_t, void *);
+	int (*start)(tracelog_instance_t *, int);
+	int (*flush)(tracelog_instance_t *);
+	int (*stop)(tracelog_instance_t *);
+	int (*monitor)(void (*)(int));
+	int (*monitor_stop)(void);
+} tl;
+#define tracelog_instance_init    tl.instance_init
+#define tracelog_instance_destroy tl.instance_destroy
+#define tracelog_setwriter        tl.setwriter
+#define tracelog_start            tl.start
+#define tracelog_flush            tl.flush
+#define tracelog_stop             tl.stop
+#define tracelog_monitor          tl.monitor
+#define tracelog_monitor_stop     tl.monitor_stop
+
+static bool load_tracelog(void)
+{
+	void *h = dlopen("libtracelog.so.1", RTLD_NOW);
+	if (!h)
+		return false;
+	/* Assigned through void ** so the object-to-function pointer conversion
+	 * is the one POSIX defines for dlsym. */
+	*(void **)&tl.instance_init = dlsym(h, "tracelog_instance_init");
+	*(void **)&tl.instance_destroy = dlsym(h, "tracelog_instance_destroy");
+	*(void **)&tl.setwriter = dlsym(h, "tracelog_setwriter");
+	*(void **)&tl.start = dlsym(h, "tracelog_start");
+	*(void **)&tl.flush = dlsym(h, "tracelog_flush");
+	*(void **)&tl.stop = dlsym(h, "tracelog_stop");
+	*(void **)&tl.monitor = dlsym(h, "tracelog_monitor");
+	*(void **)&tl.monitor_stop = dlsym(h, "tracelog_monitor_stop");
+	if (!tl.instance_init || !tl.instance_destroy || !tl.setwriter || !tl.start || !tl.flush ||
+	    !tl.stop || !tl.monitor || !tl.monitor_stop) {
+		memset(&tl, 0, sizeof(tl));
+		dlclose(h);
+		return false;
+	}
+	return true; /* never closed: the input lives as long as the process */
+}
 
 #define C          "trace"
 #define HDR_MAX    (64 * 1024)
@@ -501,6 +548,13 @@ static int init(rtc_collector *c)
 
 static void start(rtc_collector *c)
 {
+	if (!load_tracelog()) {
+		RTC_WARN(C, "cannot load libtracelog.so.1 (%s); the collector runs without kernel tracing",
+		         dlerror());
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&c->counters.trace_unavailable, 1);
+		return;
+	}
 	/* The parser runs below everything else of ours. */
 	int prio = c->cfg.send_priority > 1 ? c->cfg.send_priority - 1 : 1;
 	if (rtc_start_thread(c, &st.parser, parser_main, NULL, prio, "trace parser") != 0)

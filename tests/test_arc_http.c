@@ -527,7 +527,33 @@ static void failed_start_unwinds_every_sender(void)
 	}
 }
 
+/* Each sender's final flush ignores flush_interval: stop sends everything
+ * gathered even when the next flush is far away. */
+static void stop_flushes_before_flush_interval(void)
+{
+	setup_stdout = true;
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.interval_s = 0.02;
+	R.c.cfg.flush_interval_s = 30;
+	R.c.cfg.shutdown_timeout_s = 1;
+	FILE *saved = stdout;
+	stdout = fopen("/dev/null", "w");
+	CHECK(rtc_collector_start(&R.c) == 0);
+	struct timespec ts = {0, 200000000};
+	nanosleep(&ts, NULL);
+	rtc_collector_stop(&R.c);
+	fclose(stdout);
+	stdout = saved;
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK(gathered > 5);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), gathered);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[1]->counters.records_sent), gathered);
+	teardown();
+	setup_stdout = false;
+}
+
 const t_case lifecycle_cases[] = {
+    {"lifecycle", "stop_flushes_before_flush_interval", stop_flushes_before_flush_interval},
     {"lifecycle", "hung_arc_does_not_delay_stdout", hung_arc_does_not_delay_stdout},
     {"lifecycle", "failed_start_unwinds_every_sender", failed_start_unwinds_every_sender},
     {"lifecycle", "shutdown_counts_unsent_as_dropped", shutdown_counts_unsent_as_dropped},

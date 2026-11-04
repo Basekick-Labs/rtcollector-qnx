@@ -32,7 +32,9 @@ p40=$(echo "$out" | grep 'priority=40i' | tail -1); p20=$(echo "$out" | grep 'pr
 v99=$(field "$p20" latency_p99_ns); h99=$(field "$p40" latency_p99_ns)
 [ -n "$v99" ] && [ "$v99" -ge 4500000 ] && [ "$v99" -le 9000000 ] && ok "prio-20 victim p99 ${v99} ns (the hog's 5 ms burst)" || { bad "victim p99 ${v99:-?}"; echo "$out" | head -8; }
 [ -n "$h99" ] && [ "$h99" -le 200000 ] && ok "prio-40 thread p99 ${h99} ns (preempts)" || bad "prio-40 p99 ${h99:-?}"
-echo "$out" | grep -q 'process=rtc_hog,thread=' && ok "names: processes started after the first interval are named" || bad "names"
+echo "$out" | grep -q 'process=rtc_hog,thread=hog,' && ok "names: processes and threads started after the first interval are named" || bad "names"
+nv=$(echo "$out" | grep -c 'priority=20i'); pe=$(field "$(echo "$out" | grep ^internal_trace)" parse_errors)
+[ "$nv" -ge 2 ] && [ "${pe:-1}" = "0" ] && ok "every interval parses (victim rows in $nv intervals, parse_errors 0)" || bad "later intervals: victim rows $nv, parse_errors ${pe:-?}"
 echo "$out" | grep -q '^cpu_sched,.*context_switches=[1-9]' && echo "$out" | grep -q '^irq,.*count=[1-9]' && ok "cpu_sched and irq rows" || bad "cpu/irq rows"
 mx=$(echo "$out" | grep '^sched' | sed -n 's/.*latency_max_ns=\([0-9]*\)i.*/\1/p' | sort -n | tail -1)
 [ "${mx:-0}" -lt 1000000000 ] && ok "no implausible latency (max ${mx} ns)" || bad "implausible latency ${mx}"

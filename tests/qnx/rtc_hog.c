@@ -1,7 +1,10 @@
 /* CPU hog with a duty cycle: busy for B ms, sleep S ms, for T seconds.
  *   rtc_hog -b 20 -s 5 -t 10 [-p prio] [-c cpu] [-u busy_us -U sleep_us]
  * -p runs it SCHED_FIFO at prio, -c pins it to one CPU; -u/-U give the duty
- * cycle in microseconds instead (a short calibrated disturbance).
+ * cycle in microseconds instead (a short calibrated disturbance): then each
+ * burst starts on an absolute schedule (busy + sleep apart, with a
+ * high-resolution timer on QNX), so a period that is not a multiple of the
+ * loop's drifts across the loop's cycle instead of locking to one phase.
  * The sleeps let lower-priority threads run (so a low-priority writer really
  * writes while the hog competes with its handler). */
 #include <pthread.h>
@@ -60,12 +63,24 @@ int main(int argc, char **argv)
 	uint64_t sleep_ns = busy_us ? (uint64_t)sleep_us * 1000u : (uint64_t)sleep_ms * 1000000u;
 	uint64_t end = now_ns() + (uint64_t)secs * 1000000000u;
 	volatile uint64_t x = 0;
+	uint64_t next = now_ns();
 	while (now_ns() < end) {
 		uint64_t until = now_ns() + busy_ns;
 		while (now_ns() < until)
 			x++;
-		struct timespec ts = {(time_t)(sleep_ns / 1000000000u), (long)(sleep_ns % 1000000000u)};
-		nanosleep(&ts, NULL);
+		if (busy_us) {
+			next += busy_ns + sleep_ns;
+			struct timespec ts = {(time_t)(next / 1000000000u), (long)(next % 1000000000u)};
+#if defined(__QNX__) && defined(TIMER_PRECISE)
+			clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME | TIMER_PRECISE, &ts, NULL);
+#else
+			clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+#endif
+		} else {
+			struct timespec ts = {(time_t)(sleep_ns / 1000000000u),
+			                      (long)(sleep_ns % 1000000000u)};
+			nanosleep(&ts, NULL);
+		}
 	}
 	return (int)(x & 0);
 }

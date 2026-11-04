@@ -4,6 +4,7 @@
 #
 #   scripts/rtc-bench.sh -T ssh:root@pi4 [-s S0a,S0b,Cplus,S1,...] [-n 5] [-t 60]
 #                        [-m precise] [-c 3] [--arc URL] [--mqtt URL] [--seed N] [-o DIR]
+#                        [-L max_p50_wake_us]   (default 20 on hardware, off on the VM)
 #   scripts/rtc-bench.sh -T vm -t 5 -n 1     # dry run on the QEMU VM: no timing claims
 #
 # Deploys rtcollector, rtc_loop, rtc_hog, rtc_writer and rtc-batch.sh, checks
@@ -14,7 +15,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 TARGET=vm SCEN="S0a,S0b,Cplus,S1,S2,S3,S3m,S3h,S4,S4o,S6r,S6b" RUNS=5 SECS=60 MECH=precise CPU=3
-ARC="" MQTT="" SEED=$RANDOM OUT=""
+ARC="" MQTT="" SEED=$RANDOM OUT="" LMAX=""
 while [ $# -gt 0 ]; do
 	case $1 in
 	-T) TARGET=$2; shift ;;
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
 	--mqtt) MQTT=$2; shift ;;
 	--seed) SEED=$2; shift ;;
 	-o) OUT=$2; shift ;;
+	-L) LMAX=$2; shift ;;
 	*) sed -n '2,14p' "$0"; exit 2 ;;
 	esac
 	shift
@@ -39,18 +41,27 @@ case $TARGET in
 vm)
 	B=build-qnx-x86_64
 	HOSTIP=10.0.2.2
+	LMAX=${LMAX:-0} # QEMU timing says nothing
 	SER() { python3 -I scripts/qnx-serial.py --timeout "${2:-90}" -- "$1" | tr -d '\r'; }
 	run() { SER "$1" "${2:-90}"; }
 	;;
 ssh:*)
 	B=build-qnx-aarch64le
 	DEST=${TARGET#ssh:}
-	HOSTIP=$(ip route get "$(getent hosts "${DEST#*@}" | awk '{print $1}' | head -1)" 2>/dev/null |
-		sed -n 's/.* src \([0-9.]*\).*/\1/p')
+	LMAX=${LMAX:-20}
+	# The address this host uses toward the target (an ssh alias resolves
+	# through ssh's own configuration).
+	thost=$(ssh -G "$DEST" 2>/dev/null | awk '$1 == "hostname" {print $2; exit}')
+	taddr=$(getent ahostsv4 "${thost:-${DEST#*@}}" | awk '{print $1; exit}')
+	HOSTIP=$(ip route get "$taddr" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 	run() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST" "$1"; }
 	;;
 *) echo "-T vm or -T ssh:user@host"; exit 2 ;;
 esac
+if [ -z "$HOSTIP" ] && { [ -z "$ARC" ] || [ -z "$MQTT" ]; }; then
+	echo "cannot tell this host's address toward $TARGET: pass --arc and --mqtt"
+	exit 2
+fi
 ARC=${ARC:-http://$HOSTIP:8100}
 MQTT=${MQTT:-mqtt://$HOSTIP:18830}
 for f in rtcollector rtc_loop rtc_hog rtc_writer; do
@@ -79,10 +90,11 @@ eta=$((n * (SECS + 9)))
 	echo "arc=$ARC mqtt=$MQTT clock_skew_s=$skew collector=$( (git rev-parse --short HEAD 2>/dev/null || echo nogit) | tr -d '\n') cksum=$(cksum <"$B/rtcollector" | awk '{print $1}')"
 	echo "order: $ORDERED"
 } | tee "$OUT/batch.txt"
-echo "$TDIR/run $SECS $ARC $MQTT $CPU $MECH $ORDERED" >"$B/rtc-batch.args"
+echo "$TDIR/run $SECS $ARC $MQTT $CPU $MECH $LMAX $ORDERED" >"$B/rtc-batch.args"
 
 # Deploy.
-want=$(cksum <"$B/rtcollector" | awk '{print $1}')
+FILES="rtcollector rtc_loop rtc_hog rtc_writer rtc-batch.sh rtc-batch.args"
+want=$(cd "$B" && cksum $FILES | awk '{print $1}' | tr '\n' ' ')
 case $TARGET in
 vm)
 	PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
@@ -90,15 +102,18 @@ vm)
 	HTTP=$!
 	trap 'kill $HTTP 2>/dev/null' EXIT
 	sleep 1
-	got=$(run "mkdir -p $TDIR/bin && cd $TDIR/bin && for f in rtcollector rtc_loop rtc_hog rtc_writer rtc-batch.sh rtc-batch.args; do rm -f \$f; curl -fsS -O http://$HOSTIP:$PORT/\$f || exit 1; done; chmod 755 *; cksum < rtcollector" | awk '{print $1}' | tail -1)
+	run "mkdir -p $TDIR/bin && cd $TDIR/bin && for f in $FILES; do rm -f \$f; curl -fsS -O http://$HOSTIP:$PORT/\$f || exit 1; done; chmod 755 *" >/dev/null
+	got=$(run "cd $TDIR/bin && cksum $FILES" | awk '$NF ~ /^rtc/ {print $1}' | tr '\n' ' ')
 	;;
 *)
-	run "mkdir -p $TDIR/bin" && scp -q "$B"/{rtcollector,rtc_loop,rtc_hog,rtc_writer,rtc-batch.sh,rtc-batch.args} "$DEST:$TDIR/bin/" &&
+	# scp -O (the old protocol) when the target's sshd has no sftp-server.
+	run "mkdir -p $TDIR/bin" &&
+		{ (cd "$B" && scp -q $FILES "$DEST:$TDIR/bin/") || (cd "$B" && scp -O -q $FILES "$DEST:$TDIR/bin/"); } &&
 		run "chmod 755 $TDIR/bin/*"
-	got=$(run "cksum < $TDIR/bin/rtcollector" | awk '{print $1}')
+	got=$(run "cd $TDIR/bin && cksum $FILES" | awk '{print $1}' | tr '\n' ' ')
 	;;
 esac
-[ "$got" = "$want" ] || { echo "deploy failed (cksum $got vs $want)"; exit 1; }
+[ "$got" = "$want" ] || { echo "deploy failed (cksums $got vs $want)"; exit 1; }
 NCPU=$(run "pidin info | grep -c '^Processor'" | tr -dc '0-9')
 [ "${CPU}" -lt "${NCPU:-0}" ] || { echo "the target has ${NCPU:-?} CPUs; -c $CPU is not one of them"; exit 1; }
 
@@ -129,16 +144,17 @@ root = sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         p = os.path.normpath(os.path.join(root, self.path.lstrip("/")))
-        if not p.startswith(os.path.abspath(root)): self.send_response(403); self.end_headers(); return
+        if os.path.commonpath([p, os.path.abspath(root)]) != os.path.abspath(root):
+            self.send_response(403); self.end_headers(); return
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        open(p, "wb").write(self.rfile.read(int(self.headers["Content-Length"])))
+        open(p, "wb").write(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         self.send_response(201); self.end_headers()
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$UP" "$(cd "$OUT" && pwd)" &
 	PUTS=$!
 	trap 'kill $HTTP $PUTS 2>/dev/null' EXIT
 	sleep 1
-	run "cd $TDIR/run && for f in */* done; do curl -fsS -T \$f http://$HOSTIP:$UP/\$f || echo FAILED \$f; done; curl -fsS -T $TDIR/batch.log http://$HOSTIP:$UP/batch.log" 600 | grep FAILED
+	run "cd $TDIR/run && for f in */* *.yml calibration done; do curl -fsS -T \$f http://$HOSTIP:$UP/\$f || echo FAILED \$f; done; curl -fsS -T $TDIR/batch.log http://$HOSTIP:$UP/batch.log" 600 | grep FAILED
 	;;
 *)
 	scp -q -r "$DEST:$TDIR/run/." "$OUT/" && scp -q "$DEST:$TDIR/batch.log" "$OUT/"

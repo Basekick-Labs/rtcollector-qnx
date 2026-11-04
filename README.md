@@ -390,7 +390,10 @@ loop. QNX 8.0 does not let a program change the clock period.
 it copies the binaries, sets the target's clock if it is off (a Raspberry Pi
 has no battery-backed clock), starts the whole batch detached on the target in
 a randomised order, waits, pulls the results and prints one table pooled over
-every run. Each scenario runs the same loop:
+every run. The loop's work is calibrated once on the idle target, so every
+run does the same work. The collector runs with `interval: 1` (ten times
+busier than the default) and `trace_interval: 1` unless the table says
+otherwise. Each scenario runs the same loop:
 
 | Scenario | Collector | Load |
 |---|---|---|
@@ -411,10 +414,15 @@ scripts/rtc-bench.sh -T ssh:root@pi4 -n 5 -t 60       # numbers
 scripts/rtc-bench.sh -T vm -n 1 -t 5                  # dry run on the QEMU VM
 ```
 
-A scenario passes when it misses no more often than the baseline and its
-pooled p99.9 and maximum response stay within the baseline's own run-to-run
-difference plus 5 µs. QEMU runs only check that everything works; timing
-numbers come from real hardware.
+A scenario passes when it misses and overruns no more often than the
+baseline and its pooled p99.9 and maximum response stay within the
+baseline's own run-to-run difference plus 5 µs. The verdicts count only if
+the positive control (`Cplus`) is detected, and `Sneg` must show. A run is
+left out, and listed, when `rtc_loop` failed (for example a wake-up mechanism
+too coarse: on hardware the bench refuses a median wake-up over 20 µs), the
+collector did not start or died, the flood writer was not running, or
+publishing failed. QEMU runs only check that everything works; timing numbers
+come from real hardware.
 
 ## Licence
 

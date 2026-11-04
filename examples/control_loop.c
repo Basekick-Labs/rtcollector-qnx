@@ -6,17 +6,20 @@
  *
  *   rtc_loop [-p prio] [-c cpu] [-P period_us] [-w work_us] [-d deadline_us]
  *            [-t seconds] [-r publish_hz] [-m sleep|precise]
- *            [-H histogram.csv] [-L max_p50_wake_us] [-W warmup_ms]
+ *            [-H histogram.csv] [-L max_p50_wake_us] [-W warmup_ms] [-I work_iters]
  *
  * Each cycle k is released at r_k = t0 + k * period. After waking it records
  *   wake     = now - r_k                   (how late the wake-up was)
  * then does a fixed amount of work (iterations calibrated at start to about
- * work_us), optionally publishes, and records
+ * work_us, or -I iterations, so runs under different loads do the same work),
+ * optionally publishes, and records
  *   response = end of cycle - r_k          (what a deadline is judged on)
  *   publish  = duration of the write() to /dev/rtcollector
  * A miss is a cycle whose response exceeds the deadline (default: the
- * period). A cycle that ends after the next release skips the releases it
- * ran over (counted once as an overrun, and per release as skipped).
+ * period). A cycle that ends at or after the next release skips the
+ * releases it ran over (counted once as an overrun, and per release as
+ * skipped). The published window counters include warm-up cycles; the
+ * summary's counts do not.
  *
  * Nothing in the loop allocates, logs or blocks except the publish write.
  * The device is opened once before the loop; if a write fails the loop stops
@@ -129,8 +132,12 @@ int main(int argc, char **argv)
 {
 	int prio = 50, cpu = 3, mech = M_SLEEP;
 	uint64_t period_us = 1000, work_us = 100, deadline_us = 0, secs = 60, rate = 0, max_p50_us = 0,
-	         warm_ms = 1000;
+	         warm_ms = 1000, fixed_iters = 0;
 	const char *hist_path = NULL;
+	if ((argc - 1) % 2) {
+		fprintf(stderr, "rtc_loop: every option takes a value\n");
+		return 2;
+	}
 	for (int i = 1; i + 1 < argc; i += 2) {
 		const char *a = argv[i], *v = argv[i + 1];
 		if (!strcmp(a, "-p"))
@@ -151,6 +158,8 @@ int main(int argc, char **argv)
 			max_p50_us = strtoull(v, NULL, 10);
 		else if (!strcmp(a, "-W"))
 			warm_ms = strtoull(v, NULL, 10);
+		else if (!strcmp(a, "-I"))
+			fixed_iters = strtoull(v, NULL, 10);
 		else if (!strcmp(a, "-H"))
 			hist_path = v;
 		else if (!strcmp(a, "-m")) {
@@ -203,7 +212,9 @@ int main(int argc, char **argv)
 	ls_init(&h_wake);
 	ls_init(&h_resp);
 	ls_init(&h_pub);
-	uint64_t iters = calibrate(work_us);
+	uint64_t iters = fixed_iters ? fixed_iters : calibrate(work_us);
+	struct _clockperiod cp = {0, 0};
+	(void)ClockPeriod(CLOCK_REALTIME, NULL, &cp, 0);
 
 	uint64_t misses = 0, overruns = 0, skipped = 0, publish_errors = 0, warm_cycles = 0;
 	uint64_t w_wake = 0, w_resp = 0, w_miss = 0, w_cycles = 0; /* the published window */
@@ -219,6 +230,8 @@ int main(int argc, char **argv)
 			fprintf(stderr, "rtc_loop: %s wake-up: %s\n", mech_name[mech], strerror(e));
 			return 3;
 		}
+		if (stop)
+			break; /* woken by a signal, not by the release */
 		uint64_t woke = now_ns();
 		work(iters);
 		uint64_t pub_ns = 0;
@@ -258,13 +271,18 @@ int main(int argc, char **argv)
 			w_resp = resp;
 		w_cycles++;
 		bool over;
+		uint64_t before = skipped;
 		k = ls_next_release(t0, period, k, end, &skipped, &over);
-		overruns += over && release >= warm_end;
+		if (release < warm_end)
+			skipped = before; /* warm-up: not counted */
+		else
+			overruns += over;
 	}
 
 	printf("rtc_loop mech=%s prio=%d cpu=%d period_ns=%" PRIu64 " deadline_ns=%" PRIu64
-	       " work_iters=%" PRIu64 " warmup_cycles=%" PRIu64,
-	       mech_name[mech], prio, cpu, period, deadline, iters, warm_cycles);
+	       " work_iters=%" PRIu64 " warmup_cycles=%" PRIu64 " clock_period_ns=%lu rate_hz=%" PRIu64,
+	       mech_name[mech], prio, cpu, period, deadline, iters, warm_cycles, (unsigned long)cp.nsec,
+	       rate);
 	summary("wake", &h_wake);
 	summary("resp", &h_resp);
 	summary("pub", &h_pub);

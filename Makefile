@@ -126,7 +126,7 @@ format-check:
 
 lint:
 	cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
-	  --suppress=missingIncludeSystem --inline-suppr -I src src tests
+	  --suppress=missingIncludeSystem --inline-suppr -I src src tests examples/loopstats.c
 
 ARCH ?= x86_64
 qnx:

@@ -247,6 +247,60 @@ static void session_present_is_refused(void)
 	teardown();
 }
 
+static void short_timeout(rtc_config *c)
+{
+	c->mqtt.timeout_ms = 300;
+}
+
+/* No PUBACK within timeout: the connection is closed (a late PUBACK must
+ * never reach a later message) and the rows go again on a new one. */
+static void puback_timeout_reconnects_and_resends(void)
+{
+	fb_script s = {.action = {FB_SILENT}, .naction = 1};
+	CHECK(setup(&s, short_timeout) == 0);
+	emit("cpu", 4);
+	O()->next_attempt_ns = 0;
+	CHECK(!rtc_sender_pass(&C, true, 0));
+	CHECK_EQ_U(K(&O()->counters.records_sent), 0);
+	CHECK_EQ_U(K(&O()->counters.request_errors), 1);
+	CHECK(drain(5));
+	CHECK_EQ_U(fb_connects(B), 2);
+	CHECK_EQ_U(K(&O()->counters.records_sent), 4);
+	CHECK_EQ_U(K(&O()->counters.records_resent), 4);
+	CHECK_EQ_U(K(&O()->counters.records_outcome_unknown), 0);
+	teardown();
+}
+
+/* Nothing listening: kept, counted, and nothing sent. */
+static void unreachable_broker_keeps_the_data(void)
+{
+	fb_script s = {0};
+	CHECK(setup(&s, NULL) == 0);
+	rtc_collector_destroy(&C);
+	int port = fake_broker_port(B);
+	fake_broker_stop(B); /* the port is closed now */
+	B = NULL;
+	rtc_config cfg;
+	rtc_config_defaults(&cfg);
+	cfg.mqtt.enabled = true;
+	snprintf(cfg.mqtt.url, sizeof(cfg.mqtt.url), "mqtt://127.0.0.1:%d", port);
+	snprintf(cfg.hostname, sizeof(cfg.hostname), "pi5");
+	cfg.max_record_bytes = 512;
+	CHECK(rtc_config_validate(&cfg) == 0);
+	CHECK(rtc_collector_init(&C, &cfg) == 0);
+	emit("cpu", 2);
+	for (int i = 0; i < 3; i++) {
+		O()->next_attempt_ns = 0;
+		CHECK(!rtc_sender_pass(&C, true, 0));
+	}
+	CHECK_EQ_U(K(&O()->counters.request_errors), 3);
+	CHECK_EQ_U(K(&O()->counters.records_sent), 0);
+	CHECK(O()->has_batch);
+	rtc_collector_account_unsent(&C, false);
+	CHECK_EQ_U(K(&O()->counters.records_dropped), 2);
+	rtc_collector_destroy(&C);
+}
+
 static void small_ceiling(rtc_config *c)
 {
 	c->mqtt.max_message_bytes = 1 << 16;
@@ -661,6 +715,8 @@ const t_case mqtt_cases[] = {
     {"mqtt", "topic_host_is_configured", topic_host_is_configured},
     {"mqtt", "connack_refused_keeps_the_data", connack_refused_keeps_the_data},
     {"mqtt", "session_present_is_refused", session_present_is_refused},
+    {"mqtt", "puback_timeout_reconnects_and_resends", puback_timeout_reconnects_and_resends},
+    {"mqtt", "unreachable_broker_keeps_the_data", unreachable_broker_keeps_the_data},
     {"mqtt", "close_after_publish_resends_and_cuts", close_after_publish_resends_and_cuts},
     {"mqtt", "ceiling_grows_back", ceiling_grows_back},
     {"mqtt", "one_row_exit_after_three_closes", one_row_exit_after_three_closes},

@@ -542,6 +542,41 @@ static void keepalive_pings_and_closes_without_pingresp(void)
 	teardown();
 }
 
+/* Rows waiting for flush_interval (not due yet) still get keepalive. */
+static void keepalive_while_rows_wait_for_flush(void)
+{
+	fb_script s = {0};
+	CHECK(setup(&s, NULL) == 0);
+	C.cfg.mqtt.keepalive_s = 1;
+	C.cfg.flush_interval_s = 60;
+	emit("cpu", 1);
+	CHECK(drain(5)); /* connected */
+	emit("cpu", 1);
+	O()->last_flush_ns = rtc_mono_ns();
+	sleep_ms(600);
+	CHECK(rtc_sender_pass(&C, false, 0)); /* not due: nothing sent */
+	CHECK_EQ_U(K(&O()->counters.records_sent), 1);
+	for (int i = 0; i < 50 && fb_pings(B) == 0; i++)
+		sleep_ms(10);
+	CHECK_EQ_U(fb_pings(B), 1);
+	teardown();
+}
+
+/* Only closes on a fresh connection count toward the one-row exit: a close
+ * after the connection acknowledged data is not evidence against the row. */
+static void one_row_exit_counts_fresh_connections_only(void)
+{
+	fb_script s = {.action = {FB_ACK, FB_CLOSE, FB_CLOSE, FB_CLOSE}, .naction = 4};
+	CHECK(setup(&s, tiny_packets) == 0);
+	emit("a", 1);
+	emit("b", 1);
+	CHECK(drain(10));
+	CHECK_EQ_U(K(&O()->counters.records_sent), 2);
+	CHECK_EQ_U(K(&O()->counters.records_rejected), 0);
+	CHECK_EQ_U(fb_connects(B), 4); /* three closes, then b goes through */
+	teardown();
+}
+
 /* The broker going away while idle is noticed (EOF), and the next message
  * reconnects. */
 static void eof_while_idle_reconnects(void)
@@ -726,6 +761,8 @@ const t_case mqtt_cases[] = {
     {"mqtt", "once_has_no_presence", once_has_no_presence},
     {"mqtt", "out_of_time_stop_has_no_disconnect", out_of_time_stop_has_no_disconnect},
     {"mqtt", "keepalive_pings_and_closes_without_pingresp", keepalive_pings_and_closes_without_pingresp},
+    {"mqtt", "keepalive_while_rows_wait_for_flush", keepalive_while_rows_wait_for_flush},
+    {"mqtt", "one_row_exit_counts_fresh_connections_only", one_row_exit_counts_fresh_connections_only},
     {"mqtt", "eof_while_idle_reconnects", eof_while_idle_reconnects},
     {"mqtt", "hung_broker_holds_neither_shutdown_nor_arc", hung_broker_holds_neither_shutdown_nor_arc},
     {"mqtt", "client_ids_differ", client_ids_differ},

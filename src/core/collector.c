@@ -75,7 +75,8 @@ int rtc_collector_init(rtc_collector *c, const rtc_config *cfg)
 	atomic_init(&c->stop_collect, false);
 	atomic_init(&c->lp_ndrains, 0);
 
-	unsigned nout = (cfg->arc.enabled ? 1 : 0) + (cfg->out_stdout.enabled ? 1 : 0);
+	unsigned nout =
+	    (cfg->arc.enabled ? 1 : 0) + (cfg->mqtt.enabled ? 1 : 0) + (cfg->out_stdout.enabled ? 1 : 0);
 	if (rtc_ring_init(&c->ring, cfg->buffer_bytes, cfg->max_record_bytes, nout) != 0) {
 		RTC_ERROR(C, "cannot allocate the buffer (buffer_bytes=%zu)", cfg->buffer_bytes);
 		return -1;
@@ -99,6 +100,11 @@ int rtc_collector_init(rtc_collector *c, const rtc_config *cfg)
 
 	if (cfg->arc.enabled) {
 		if (rtc_output_arc_create(c, c->noutputs, &c->outputs[c->noutputs]) != 0)
+			return -1;
+		c->noutputs++;
+	}
+	if (cfg->mqtt.enabled) {
+		if (rtc_output_mqtt_create(c, c->noutputs, &c->outputs[c->noutputs]) != 0)
 			return -1;
 		c->noutputs++;
 	}
@@ -236,6 +242,8 @@ static bool output_pass(rtc_collector *c, rtc_output *o, bool final, uint64_t de
 				if (o->draining || final)
 					o->last_flush_ns = now;
 				o->draining = false;
+				if (o->idle && !final)
+					o->idle(o, now);
 				return true;
 			}
 			/* Once a flush is due, keep reading until the ring is empty:
@@ -244,8 +252,11 @@ static bool output_pass(rtc_collector *c, rtc_output *o, bool final, uint64_t de
 			if (!o->draining) {
 				bool due =
 				    final || now - o->last_flush_ns >= flush || pending >= o->batch_bytes;
-				if (!due)
+				if (!due) {
+					if (o->idle)
+						o->idle(o, now);
 					return true;
+				}
 				o->draining = true;
 			}
 			if (o->batch_begin)
@@ -342,6 +353,8 @@ static void *send_main(void *arg)
 		struct timespec s = {0, 20000000};
 		nanosleep(&s, NULL);
 	}
+	if (o->finish)
+		o->finish(o, deadline);
 	if (c->sender_exit_delay_ns) {
 		struct timespec s = {(time_t)(c->sender_exit_delay_ns / 1000000000u),
 		                     (long)(c->sender_exit_delay_ns % 1000000000u)};

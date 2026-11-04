@@ -3,6 +3,7 @@
 #include "log.h"
 #include "collector.h"
 #include "ring.h"
+#include "../outputs/row.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -49,6 +50,41 @@ void rtc_config_defaults(rtc_config *c)
 	c->arc.max_measurements = 64;
 	snprintf(c->arc.database, sizeof(c->arc.database), "default");
 	c->out_stdout.batch_bytes = 64u << 10;
+	snprintf(c->mqtt.topic, sizeof(c->mqtt.topic), "rtcollector/{host}/{measurement}");
+	snprintf(c->mqtt.status_topic, sizeof(c->mqtt.status_topic), "rtcollector/{host}");
+	c->mqtt.time_div = 1000; /* us: Arc's own unit */
+	c->mqtt.keepalive_s = 60;
+	c->mqtt.timeout_ms = 10000;
+	c->mqtt.batch_bytes = 256u << 10;
+	c->mqtt.max_message_bytes = 128u << 10;
+}
+
+int rtc_mqtt_topic_expand(const char *tmpl, const char *host, const char *m, size_t ml, char *out, size_t cap)
+{
+	size_t n = 0;
+	for (const char *p = tmpl; *p;) {
+		const char *add = p;
+		size_t al = 1;
+		if (*p == '{') {
+			if (!strncmp(p, "{host}", 6)) {
+				add = host;
+				al = strlen(host);
+				p += 6;
+			} else if (!strncmp(p, "{measurement}", 13) && m) {
+				add = m;
+				al = ml;
+				p += 13;
+			} else
+				return -1;
+		} else
+			p++;
+		if (al >= cap - n)
+			return -1;
+		memcpy(out + n, add, al);
+		n += al;
+	}
+	out[n] = '\0';
+	return (int)n;
 }
 
 bool rtc_valid_arc_name(const char *s, size_t n, size_t max)
@@ -215,6 +251,74 @@ static void load_stdout(ctx *x, rtc_config *c, yaml_node_t *m)
 			c->out_stdout.batch_set = true;
 		} else if (k)
 			RTC_WARN(C, "outputs.stdout.%s: unknown key, ignored", k);
+	}
+}
+
+static void load_mqtt(ctx *x, rtc_config *c, yaml_node_t *m)
+{
+	rtc_mqtt_cfg *q = &c->mqtt;
+	q->enabled = true;
+	if (!m || m->type != YAML_MAPPING_NODE)
+		return; /* url missing -> validate fails */
+	for (yaml_node_pair_t *p = m->data.mapping.pairs.start; p < m->data.mapping.pairs.top; p++) {
+		const char *k = scalar(node(x, p->key));
+		yaml_node_t *v = node(x, p->value);
+		if (!k)
+			continue;
+		double t = 0;
+		if (!strcmp(k, "url"))
+			get_str(x, v, "outputs.mqtt.url", q->url, sizeof(q->url));
+		else if (!strcmp(k, "topic"))
+			get_str(x, v, "outputs.mqtt.topic", q->topic, sizeof(q->topic));
+		else if (!strcmp(k, "status_topic"))
+			get_str(x, v, "outputs.mqtt.status_topic", q->status_topic, sizeof(q->status_topic));
+		else if (!strcmp(k, "client_id"))
+			get_str(x, v, "outputs.mqtt.client_id", q->client_id, sizeof(q->client_id));
+		else if (!strcmp(k, "username"))
+			get_str(x, v, "outputs.mqtt.username", q->username, sizeof(q->username));
+		else if (!strcmp(k, "password"))
+			get_str(x, v, "outputs.mqtt.password", q->password, sizeof(q->password));
+		else if (!strcmp(k, "format")) {
+			const char *f = scalar(v);
+			if (f && !strcmp(f, "json"))
+				q->json = true;
+			else if (f && !strcmp(f, "msgpack"))
+				q->json = false;
+			else
+				err(x, "outputs.mqtt.format", "must be msgpack or json");
+		} else if (!strcmp(k, "time_precision")) {
+			const char *f = scalar(v);
+			static const struct {
+				const char *n;
+				uint64_t div;
+			} units[] = {{"ns", 1}, {"us", 1000}, {"ms", 1000000}, {"s", 1000000000}};
+			size_t u = 0;
+			while (u < 4 && !(f && !strcmp(f, units[u].n)))
+				u++;
+			if (u == 4)
+				err(x, "outputs.mqtt.time_precision", "must be ns, us, ms or s");
+			else
+				q->time_div = units[u].div;
+		} else if (!strcmp(k, "keepalive")) {
+			get_num(x, v, "outputs.mqtt.keepalive", &t);
+			if (t < 0 || t > 65535 || t != floor(t))
+				err(x, "outputs.mqtt.keepalive",
+				    "must be a whole number of seconds from 0 to 65535");
+			else
+				q->keepalive_s = (uint32_t)t;
+		} else if (!strcmp(k, "timeout")) {
+			get_num(x, v, "outputs.mqtt.timeout", &t);
+			if (t < 1 || t > 300)
+				err(x, "outputs.mqtt.timeout", "must be from 1 to 300 seconds");
+			else
+				q->timeout_ms = (uint32_t)(t * 1000);
+		} else if (!strcmp(k, "batch_bytes")) {
+			get_size(x, v, "outputs.mqtt.batch_bytes", &q->batch_bytes);
+			q->batch_set = true;
+		} else if (!strcmp(k, "max_message_bytes"))
+			get_size(x, v, "outputs.mqtt.max_message_bytes", &q->max_message_bytes);
+		else
+			RTC_WARN(C, "outputs.mqtt.%s: unknown key, ignored", k);
 	}
 }
 
@@ -410,6 +514,8 @@ static void load_doc(ctx *x, rtc_config *c)
 					load_arc(x, c, settings);
 				else if (!strcmp(name, "stdout"))
 					load_stdout(x, c, settings);
+				else if (!strcmp(name, "mqtt"))
+					load_mqtt(x, c, settings);
 				else
 					RTC_WARN(C, "outputs: %s is not available in this build, skipped",
 					         name);
@@ -465,6 +571,192 @@ int rtc_config_load(rtc_config *c, const char *path)
 	return rc;
 }
 
+/* mqtt://host[:port] or mqtt://[v6][:port]; nothing else. */
+static int parse_mqtt_url(rtc_mqtt_cfg *q)
+{
+	const char *u = q->url;
+	if (!strncmp(u, "mqtts://", 8)) {
+		RTC_ERROR(C, "outputs.mqtt.url: TLS (mqtts://) is not in this build yet");
+		return 1;
+	}
+	if (strncmp(u, "mqtt://", 7)) {
+		RTC_ERROR(C, "outputs.mqtt.url: must start with mqtt://");
+		return 1;
+	}
+	const char *h = u + 7, *he, *rest;
+	if (*h == '[') {
+		he = strchr(h, ']');
+		if (!he) {
+			RTC_ERROR(C, "outputs.mqtt.url: unclosed [ in the address");
+			return 1;
+		}
+		h++;
+		rest = he + 1;
+	} else {
+		he = h + strcspn(h, ":/?#@");
+		rest = he;
+	}
+	if (he == h || (size_t)(he - h) >= sizeof(q->host) || strpbrk(u + 7, "@/?#") ||
+	    (*rest && *rest != ':')) {
+		RTC_ERROR(C, "outputs.mqtt.url: must be mqtt://host or mqtt://host:port (no user, path or "
+		             "query; set username and password as keys)");
+		return 1;
+	}
+	snprintf(q->host, sizeof(q->host), "%.*s", (int)(he - h), h);
+	snprintf(q->port, sizeof(q->port), "1883");
+	if (*rest == ':') {
+		char *end;
+		errno = 0;
+		long port = strtol(rest + 1, &end, 10);
+		if (end == rest + 1 || *end || errno || port < 1 || port > 65535) {
+			RTC_ERROR(C, "outputs.mqtt.url: the port must be from 1 to 65535");
+			return 1;
+		}
+		snprintf(q->port, sizeof(q->port), "%ld", port);
+	}
+	return 0;
+}
+
+/* An expanded topic: errors for what a broker refuses, warnings for what some
+ * brokers do (AWS IoT: 7 slashes, 256 bytes). */
+static int check_topic(const char *key, const char *t, size_t len_worst)
+{
+	size_t n = strlen(t);
+	int bad = 0;
+	if (!n || !rtc_utf8_valid(t, n) || strpbrk(t, "+#") || t[0] == '$') {
+		RTC_ERROR(C, "%s: \"%s\" must be non-empty UTF-8 without + or # and not start with $", key,
+		          t);
+		bad++;
+	}
+	if (len_worst > RTC_MQTT_TOPIC_MAX) {
+		RTC_ERROR(C, "%s: up to %zu bytes with a 128-byte measurement; at most %d", key, len_worst,
+		          RTC_MQTT_TOPIC_MAX);
+		bad++;
+	}
+	if (bad)
+		return bad;
+	unsigned slashes = 0;
+	for (size_t i = 0; i < n; i++)
+		slashes += t[i] == '/';
+	if (t[0] == '/' || t[n - 1] == '/' || strstr(t, "//"))
+		RTC_WARN(C, "%s: \"%s\" has an empty level", key, t);
+	if (slashes > 7 || len_worst > 256)
+		RTC_WARN(C,
+		         "%s: \"%s\" is deeper than 8 levels or longer than 256 bytes, which some "
+		         "brokers (AWS IoT) refuse",
+		         key, t);
+	return 0;
+}
+
+static int validate_mqtt(rtc_config *c)
+{
+	rtc_mqtt_cfg *q = &c->mqtt;
+	int bad = parse_mqtt_url(q);
+	if (!c->hostname[0] && gethostname(c->hostname, sizeof(c->hostname) - 1) != 0)
+		snprintf(c->hostname, sizeof(c->hostname), "unknown");
+	const char *host = c->hostname;
+	for (unsigned i = 0; i < c->ntags; i++)
+		if (!strcmp(c->tags[i].key, "host"))
+			host = c->tags[i].val;
+
+	char m128[129], t[RTC_MQTT_TOPIC_MAX * 2], tw[RTC_MQTT_TOPIC_MAX * 2];
+	memset(m128, 'm', 128);
+	m128[128] = '\0';
+	const char *mp = strstr(q->topic, "{measurement}");
+	if (mp && strstr(mp + 1, "{measurement}")) {
+		RTC_ERROR(C, "outputs.mqtt.topic: {measurement} may appear once");
+		bad++;
+	} else if (rtc_mqtt_topic_expand(q->topic, host, "m", 1, t, sizeof(t)) < 0 ||
+	           rtc_mqtt_topic_expand(q->topic, host, m128, 128, tw, sizeof(tw)) < 0) {
+		RTC_ERROR(C,
+		          "outputs.mqtt.topic: only {host} and {measurement} may be used, within %d "
+		          "bytes",
+		          RTC_MQTT_TOPIC_MAX);
+		bad++;
+	} else
+		bad += check_topic("outputs.mqtt.topic", t, strlen(tw));
+	if (q->status_topic[0]) {
+		char s[RTC_MQTT_TOPIC_MAX * 2];
+		if (rtc_mqtt_topic_expand(q->status_topic, host, NULL, 0, s, sizeof(s)) < 0) {
+			RTC_ERROR(C, "outputs.mqtt.status_topic: only {host} may be used, within %d bytes",
+			          RTC_MQTT_TOPIC_MAX);
+			bad++;
+		} else if (!(bad += check_topic("outputs.mqtt.status_topic", s, strlen(s)))) {
+			/* Must not be the data topic of any measurement. */
+			char pre[RTC_MQTT_TOPIC_MAX * 2], post[RTC_MQTT_TOPIC_MAX * 2];
+			bool clash = false;
+			if (!mp)
+				clash =
+				    rtc_mqtt_topic_expand(q->topic, host, NULL, 0, pre, sizeof(pre)) >= 0 &&
+				    !strcmp(pre, s);
+			else {
+				char tmpl[RTC_MQTT_TOPIC_MAX + 1];
+				snprintf(tmpl, sizeof(tmpl), "%.*s", (int)(mp - q->topic), q->topic);
+				int pl = rtc_mqtt_topic_expand(tmpl, host, NULL, 0, pre, sizeof(pre));
+				int ql = rtc_mqtt_topic_expand(mp + 13, host, NULL, 0, post, sizeof(post));
+				size_t sl = strlen(s);
+				if (pl >= 0 && ql >= 0 && sl > (size_t)(pl + ql) &&
+				    !strncmp(s, pre, (size_t)pl) && !strcmp(s + sl - (size_t)ql, post))
+					clash = rtc_valid_arc_name(s + pl, sl - (size_t)pl - (size_t)ql, 128);
+			}
+			if (clash) {
+				RTC_ERROR(
+				    C,
+				    "outputs.mqtt.status_topic: \"%s\" is also a data topic; use another "
+				    "depth or prefix",
+				    s);
+				bad++;
+			}
+		}
+	}
+
+	/* Worst case for one row: JSON escapes a byte into six; the injected
+	 * tags (up to 16 x 384 bytes); keys and punctuation; the PUBLISH header. */
+	size_t worst =
+	    6 * (size_t)c->max_record_bytes + 6 * (RTC_CFG_MAX_TAGS * 384) + 256 + RTC_MQTT_TOPIC_MAX + 9;
+	if (q->max_message_bytes < 1024 || q->max_message_bytes > (256u << 20) ||
+	    q->max_message_bytes < worst) {
+		RTC_ERROR(C,
+		          "outputs.mqtt.max_message_bytes: must be from 1KiB to 256MiB and at least %zu "
+		          "(6 x max_record_bytes + 6 x 16 x 384 + %d)",
+		          worst, 256 + RTC_MQTT_TOPIC_MAX + 9);
+		bad++;
+	}
+	if (q->batch_bytes < c->max_record_bytes || q->batch_bytes > c->buffer_bytes) {
+		RTC_ERROR(C, "outputs.mqtt.batch_bytes: must be between max_record_bytes and buffer_bytes");
+		bad++;
+	}
+	const char *env = getenv("RTC_MQTT_PASSWORD");
+	if (env && *env) {
+		if (strlen(env) >= sizeof(q->password)) {
+			RTC_ERROR(C, "RTC_MQTT_PASSWORD: is too long");
+			bad++;
+		} else
+			snprintf(q->password, sizeof(q->password), "%s", env);
+	} else if (!strncmp(q->password, "secret:", 7)) {
+		RTC_ERROR(C, "outputs.mqtt.password: secret: references are not supported; set "
+		             "RTC_MQTT_PASSWORD");
+		bad++;
+	}
+	if (q->password[0] && !q->username[0]) {
+		RTC_ERROR(C, "outputs.mqtt.password: needs a username (MQTT 3.1.1)");
+		bad++;
+	}
+	if (q->client_id[0]) {
+		bool plain = strlen(q->client_id) <= 23;
+		for (const char *p = q->client_id; *p && plain; p++)
+			plain = isalnum((unsigned char)*p);
+		if (!plain)
+			RTC_WARN(C, "outputs.mqtt.client_id: over 23 bytes or not only letters and digits; "
+			            "some brokers refuse it");
+		if (!rtc_utf8_valid(q->client_id, strlen(q->client_id))) {
+			RTC_ERROR(C, "outputs.mqtt.client_id: must be UTF-8");
+			bad++;
+		}
+	}
+	return bad;
+}
+
 int rtc_config_validate(rtc_config *c)
 {
 	int bad = 0;
@@ -494,8 +786,8 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "buffer_bytes: must hold at least one record of max_record_bytes");
 		bad++;
 	}
-	if (!c->arc.enabled && !c->out_stdout.enabled) {
-		RTC_ERROR(C, "outputs: at least one output (arc or stdout) is required");
+	if (!c->arc.enabled && !c->out_stdout.enabled && !c->mqtt.enabled) {
+		RTC_ERROR(C, "outputs: at least one output (arc, mqtt or stdout) is required");
 		bad++;
 	}
 	if (c->collect_priority < 1 || c->collect_priority > 253 || c->send_priority < 1 ||
@@ -564,6 +856,10 @@ int rtc_config_validate(rtc_config *c)
 		c->arc.batch_bytes = half;
 	if (!c->out_stdout.batch_set && c->out_stdout.batch_bytes > half)
 		c->out_stdout.batch_bytes = half;
+	if (!c->mqtt.batch_set && c->mqtt.batch_bytes > half)
+		c->mqtt.batch_bytes = half;
+	if (c->mqtt.enabled)
+		bad += validate_mqtt(c);
 	if (c->arc.enabled && !strncmp(c->arc.token, "secret:", 7) && !getenv("RTC_ARC_TOKEN")) {
 		RTC_ERROR(C, "outputs.arc.token: secret: references are not supported; set RTC_ARC_TOKEN");
 		bad++;

@@ -28,6 +28,8 @@
  *   outputs:
  *     - arc: {url, database, token, batch_bytes, timeout, max_measurements_per_batch (1-256)}
  *     - stdout: {}
+ *     - mqtt: {url, topic, format, time_precision, client_id, username, password,
+ *              keepalive, timeout, batch_bytes, max_message_bytes, status_topic}
  */
 #ifndef RTC_CONFIG_H
 #define RTC_CONFIG_H
@@ -61,6 +63,27 @@ typedef struct {
 	size_t batch_bytes;
 	bool batch_set;
 } rtc_stdout_cfg;
+
+#define RTC_MQTT_TOPIC_MAX 1024
+
+typedef struct {
+	bool enabled;
+	char url[512];
+	char host[256]; /* from url: a name or an address ([v6] without brackets) */
+	char port[8];
+	char topic[RTC_MQTT_TOPIC_MAX + 1];        /* template: {host}, {measurement} */
+	char status_topic[RTC_MQTT_TOPIC_MAX + 1]; /* template: {host}; "" = no presence */
+	bool json;                                 /* format: json (default msgpack) */
+	uint64_t time_div;                         /* ns per unit of time_precision */
+	char client_id[128];                       /* "": rtc + hash(host) + random */
+	char username[256];
+	char password[256];
+	uint32_t keepalive_s; /* 0 = off */
+	uint32_t timeout_ms;
+	size_t batch_bytes;
+	bool batch_set;
+	size_t max_message_bytes; /* the whole PUBLISH packet */
+} rtc_mqtt_cfg;
 
 typedef struct {
 	double interval_s;
@@ -99,6 +122,7 @@ typedef struct {
 	unsigned ninputs;
 	rtc_arc_cfg arc;
 	rtc_stdout_cfg out_stdout;
+	rtc_mqtt_cfg mqtt;
 } rtc_config;
 
 void rtc_config_defaults(rtc_config *c);
@@ -111,6 +135,12 @@ int rtc_config_validate(rtc_config *c);
 
 /* "64KiB", "1MiB", "4096" -> bytes. Returns 0 or -1. */
 int rtc_parse_size(const char *s, size_t *out);
+
+/* Expands an MQTT topic template: {host} and {measurement} (m, may be NULL
+ * for a template without it). Returns the length, or -1 when it does not fit
+ * in cap or names another placeholder. */
+int rtc_mqtt_topic_expand(const char *tmpl, const char *host, const char *m, size_t ml, char *out,
+                          size_t cap);
 
 /* Arc's rule for database and measurement names: ^[a-zA-Z][a-zA-Z0-9_-]*$ */
 bool rtc_valid_arc_name(const char *s, size_t n, size_t max);

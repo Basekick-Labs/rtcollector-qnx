@@ -125,9 +125,10 @@ void rtc_sched_snapshot_free(rtc_sched_snapshot *o);
  * Reported: threads that woke at least once (pid 1 idle threads excluded):
  * those whose highest priority >= min_prio (by p99 latency if there are more
  * than out->max_rows), then the `top` others with the highest p99, up to
- * out->max_rows; the rest are counted as omitted. Threads without an event
- * for two intervals that are not ready or running are evicted: their exit
- * may have been in events the kernel or the collector dropped. */
+ * out->max_rows; the rest are counted as omitted. When the table is three-
+ * quarters full, threads without an event for two intervals that are not
+ * ready or running are evicted, down to half full: their exit may have been in events the
+ * kernel or the collector dropped. */
 void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_sched_snapshot *out);
 
 #endif

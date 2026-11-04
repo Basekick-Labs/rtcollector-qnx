@@ -371,11 +371,15 @@ void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_s
 		if (t->lat.n)
 			memset(&t->lat, 0, sizeof(t->lat));
 	}
-	/* Evict threads idle for two intervals that are not ready or running: a
-	 * lost DEAD event must not hold a slot for ever. A READY thread is kept,
-	 * its wait is what this input reports. A freed slot can receive a later
-	 * entry, so each slot is checked until it holds a keeper. */
-	for (size_t i = 0; i < s->max_threads; i++) {
+	/* With the table three-quarters full, evict (down to half full) threads idle for two
+	 * intervals that are not ready or running: a lost DEAD event must not
+	 * hold a slot for ever. Not sooner: an evicted thread loses its name
+	 * (names come only at creation and session start). A READY thread is
+	 * kept, its wait is what this input reports. A freed slot can receive a
+	 * later entry, so each slot is checked until it holds a keeper. */
+	size_t cap = s->max_threads - 1;
+	bool pressure = s->nthreads * 4 >= cap * 3; /* then down to half full */
+	for (size_t i = 0; pressure && i < s->max_threads && s->nthreads * 2 > cap; i++) {
 		rtc_sched_thread *t = &s->threads[i];
 		while (t->used && t->idle >= 2 && t->state == RTC_EV_BLOCKED) {
 			slot_free(s, i);

@@ -200,13 +200,13 @@ static void idle_threads_evicted(void)
 	CHECK_EQ_U(S.threads_evicted, 0);
 	rtc_sched_take(&S, 1, 40, 2, &o); /* one quiet interval */
 	CHECK_EQ_U(S.threads_evicted, 0);
-	rtc_sched_take(&S, 1, 40, 2, &o); /* two: the blocked ones go */
-	CHECK_EQ_U(S.threads_evicted, 15);
-	CHECK_EQ_U(S.nthreads, 1);
+	rtc_sched_take(&S, 1, 40, 2, &o); /* two, table full: down to half */
+	CHECK_EQ_U(S.threads_evicted, 8);
+	CHECK_EQ_U(S.nthreads, 8);
 	/* The READY thread kept its pending wakeup: it is measured when it runs. */
 	ev(0, 5000, 400, 1, RTC_EV_RUNNING, 10);
 	uint64_t ov = S.threads_overflow;
-	for (uint32_t i = 100; i < 110; i++) /* new threads get slots again */
+	for (uint32_t i = 100; i < 108; i++) /* new threads get slots again */
 		ev(0, 6000, 500, i, RTC_EV_READY, 10);
 	CHECK_EQ_U(S.threads_overflow, ov);
 	rtc_sched_take(&S, 1, 40, 4, &o);
@@ -215,6 +215,27 @@ static void idle_threads_evicted(void)
 		if (o.rows[i].pid == 400 && o.rows[i].max_ns == 4980)
 			found = true;
 	CHECK(found);
+	rtc_sched_snapshot_free(&o);
+	rtc_sched_free(&S);
+}
+
+/* A table with room evicts nothing: a long sleeper keeps its slot and name. */
+static void no_eviction_without_pressure(void)
+{
+	CHECK(rtc_sched_init(&S, 64) == 0);
+	rtc_sched_snapshot o;
+	rtc_sched_snapshot_init(&o, 64);
+	rtc_sched_thread_name(&S, 9, 1, "watchdog");
+	ev(0, 10, 9, 1, RTC_EV_READY, 50);
+	ev(0, 11, 9, 1, RTC_EV_RUNNING, 50);
+	ev(0, 12, 9, 1, RTC_EV_BLOCKED, 50);
+	for (int i = 0; i < 5; i++)
+		rtc_sched_take(&S, 1, 40, 2, &o);
+	CHECK_EQ_U(S.threads_evicted, 0);
+	ev(0, 100, 9, 1, RTC_EV_READY, 50);
+	ev(0, 101, 9, 1, RTC_EV_RUNNING, 50);
+	rtc_sched_take(&S, 1, 40, 2, &o);
+	CHECK(o.nrows == 1 && !strcmp(o.rows[0].thread, "watchdog"));
 	rtc_sched_snapshot_free(&o);
 	rtc_sched_free(&S);
 }
@@ -306,6 +327,7 @@ const t_case sched_cases[] = {
     {"sched", "table_churn_and_overflow", table_churn_and_overflow},
     {"sched", "interrupts", interrupts},
     {"sched", "idle_threads_evicted", idle_threads_evicted},
+    {"sched", "no_eviction_without_pressure", no_eviction_without_pressure},
     {"sched", "deletion_keeps_lookups", deletion_keeps_lookups},
     {"sched", "high_priority_selection_by_latency", high_priority_selection_by_latency},
     {0},

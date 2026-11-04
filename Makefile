@@ -107,6 +107,7 @@ test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
 	@# pipefail here as well: GNU make 3.81 (macOS) ignores .SHELLFLAGS, and the
 	@# grep's status would hide failing tests.
 	set -o pipefail; $(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'
+	python3 -I scripts/rtc-bench-report.py --self-test
 
 tsan:
 	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests

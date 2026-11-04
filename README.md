@@ -366,6 +366,56 @@ measurement (a topic rule's `measurement` would override it). Keep
 `format: msgpack`: JSON numbers arrive in Arc as floats, so an integer field
 would change type, and a measurement should not switch formats once written.
 
+## Measuring the overhead: `rtc_loop` and `rtc-bench.sh`
+
+`rtc_loop` (`examples/control_loop.c`) is a 1 kHz control loop that measures
+itself: `SCHED_FIFO` at priority 50, pinned to one CPU, memory locked. Every
+cycle it records how late it woke, its response time (release to the end of
+the cycle, its own work and publishing included) and, when it publishes to
+`/dev/rtcollector`, how long the `write()` took. A miss is a response over
+the deadline (default: the period); a cycle that runs past the next release
+skips it and counts an overrun. It prints one summary line and can write its
+histograms for pooling. It is also the example of a program publishing its
+own metrics.
+
+```sh
+rtc_loop -m precise -c 3 -t 60 -r 10    # 60 s on CPU 3, publish 10 times a second
+```
+
+`-m precise` uses a high-resolution timer (`TIMER_PRECISE`); `-m sleep`
+wakes on the clock tick (1 ms by default), which is too coarse for a 1 kHz
+loop. QNX 8.0 does not let a program change the clock period.
+
+`scripts/rtc-bench.sh` runs the comparison from a host next to the target:
+it copies the binaries, sets the target's clock if it is off (a Raspberry Pi
+has no battery-backed clock), starts the whole batch detached on the target in
+a randomised order, waits, pulls the results and prints one table pooled over
+every run. Each scenario runs the same loop:
+
+| Scenario | Collector | Load |
+|---|---|---|
+| `S0a`, `S0b` | off | none: two baselines, whose difference is the noise floor |
+| `Cplus` | off | a 20 µs burst at priority 60 on the loop's CPU every 100 ms: the harness must see it |
+| `S1` | cpu, mem, processes → Arc | |
+| `S2`, `S2d` | `S1` + trace (`trace_interval` 1 s, 10 s) | |
+| `S3` | `S2` + `/dev/rtcollector`, the loop publishing 10 Hz | |
+| `S3m` | `S3`, the collector kept on CPU 0 | |
+| `S3h` | `S3` | busy threads at priority 10 on every other CPU |
+| `S4`, `S4o` | `S3` | a flood of 4 KiB writes at priority 10, on the loop's CPU or another |
+| `S3q` | `S3` to MQTT instead of Arc | |
+| `S6r`, `S6b` | `S3`, Arc refusing connections / not answering | |
+| `Sneg` | `S3` with `collect_priority: 60`, above the loop | a misconfiguration that must show |
+
+```sh
+scripts/rtc-bench.sh -T ssh:root@pi4 -n 5 -t 60       # numbers
+scripts/rtc-bench.sh -T vm -n 1 -t 5                  # dry run on the QEMU VM
+```
+
+A scenario passes when it misses no more often than the baseline and its
+pooled p99.9 and maximum response stay within the baseline's own run-to-run
+difference plus 5 µs. QEMU runs only check that everything works; timing
+numbers come from real hardware.
+
 ## Licence
 
 [Apache-2.0](LICENSE).

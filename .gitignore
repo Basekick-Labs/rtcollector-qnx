@@ -22,3 +22,4 @@ qnxsdp-env.sh.local
 # Private project instructions: canonical copy in Basekick-Labs/plannings (rtcollector-qnx/CLAUDE.md)
 CLAUDE.md
 .claude/
+bench-results/

@@ -52,4 +52,4 @@ static int gather(rtc_collector *c)
 	return 0;
 }
 
-const rtc_input_def rtc_input_mem = {"mem", init, gather};
+const rtc_input_def rtc_input_mem = {.name = "mem", .init = init, .gather = gather};

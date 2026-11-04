@@ -149,4 +149,4 @@ static int gather(rtc_collector *c)
 	return rc;
 }
 
-const rtc_input_def rtc_input_cpu = {"cpu", init, gather};
+const rtc_input_def rtc_input_cpu = {.name = "cpu", .init = init, .gather = gather};

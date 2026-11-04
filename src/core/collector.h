@@ -6,12 +6,15 @@
 #include "config.h"
 #include "counters.h"
 #include "record.h"
+#include "lpdrain.h"
 #include "ring.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#define RTC_RMGR_MAX_THREADS 16
 
 typedef struct rtc_collector rtc_collector;
 typedef struct rtc_output rtc_output;
@@ -22,6 +25,11 @@ typedef struct {
 	/* Called once per round on the collection thread. Builds records into
 	 * c->scratch and emits each with rtc_emit(). Returns 0 or -1. */
 	int (*gather)(rtc_collector *c);
+	/* Optional, for inputs with a thread of their own: started after the
+	 * collector's threads (never under --once), stopped before them. */
+	void (*start)(rtc_collector *c);
+	void (*stop)(rtc_collector *c);
+	void (*destroy)(rtc_collector *c);
 } rtc_input_def;
 
 enum rtc_send_outcome {
@@ -64,7 +72,13 @@ struct rtc_collector {
 	rtc_config cfg;
 	rtc_ring ring;
 	rtc_collect_counters counters;
-	uint8_t *scratch; /* max_record_bytes, collection thread only */
+	/* /dev/rtcollector: one counter set per handler thread (single writer each). */
+	rtc_rmgr_counters rmgr_counters[RTC_RMGR_MAX_THREADS];
+	unsigned rmgr_nthreads;
+	/* Set by the rmgr input: raw writes the collection thread converts. */
+	rtc_lp_drain *lp_drains;     /* one per rmgr handler thread */
+	_Atomic unsigned lp_ndrains; /* published after lp_drains is set; 0 = rmgr not running */
+	uint8_t *scratch;            /* max_record_bytes, collection thread only */
 
 	const rtc_input_def *inputs[RTC_CFG_MAX_INPUTS];
 	unsigned ninputs;
@@ -72,7 +86,8 @@ struct rtc_collector {
 	unsigned noutputs;
 
 	uint64_t clock_floor_ns;
-	_Atomic bool stop;
+	_Atomic bool stop_collect; /* collection thread: stop (set first) */
+	_Atomic bool stop; /* sender: final flush, then stop (set after the collection thread ended) */
 	/* Set at shutdown and in --once: in-flight requests are aborted once
 	 * CLOCK_MONOTONIC passes it. 0 = no limit. */
 	_Atomic uint64_t abort_after_ns;
@@ -95,6 +110,11 @@ int rtc_collector_run_once(rtc_collector *c);
 
 /* Collection-thread helpers for inputs. */
 void rtc_emit(rtc_collector *c, rtc_rec_builder *b);
+/* An already-built record with its timestamp (0 = now). */
+void rtc_emit_record(rtc_collector *c, const uint8_t *rec, size_t len, uint64_t ts);
+/* Starts a thread at a fixed SCHED_RR priority on QNX (see collector.c). */
+int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
+                     const char *what);
 uint64_t rtc_now_ns(void);  /* CLOCK_REALTIME */
 uint64_t rtc_mono_ns(void); /* CLOCK_MONOTONIC */
 const char *rtc_hostname(const rtc_collector *c);
@@ -103,12 +123,16 @@ const char *rtc_hostname(const rtc_collector *c);
 int rtc_output_alloc_batch(rtc_output *o, size_t batch_bytes, uint32_t max_record);
 void rtc_output_free_batch(rtc_output *o);
 
+/* Sum of the per-thread /dev/rtcollector counters (max for max_prio_seen). */
+void rtc_rmgr_sum(const rtc_collector *c, rtc_rmgr_counters *out);
+
 /* Built-in inputs and outputs. */
 extern const rtc_input_def rtc_input_internal;
 #ifdef RTC_QNX
 extern const rtc_input_def rtc_input_cpu;
 extern const rtc_input_def rtc_input_mem;
 extern const rtc_input_def rtc_input_processes;
+extern const rtc_input_def rtc_input_rmgr;
 #endif
 /* The input called name in this build, or NULL. */
 const rtc_input_def *rtc_input_find(const char *name);

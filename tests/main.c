@@ -16,9 +16,12 @@ SUITE(arc_encode)
 SUITE(arc_http)
 SUITE(lifecycle)
 SUITE(cpumath)
+SUITE(lp)
+SUITE(lpdrain)
 
 static const t_case *suites[] = {record_cases,     msgpack_cases,  ring_cases,      config_cases,
-                                 arc_encode_cases, arc_http_cases, lifecycle_cases, cpumath_cases};
+                                 arc_encode_cases, arc_http_cases, lifecycle_cases, cpumath_cases,
+                                 lp_cases,         lpdrain_cases};
 
 int main(int argc, char **argv)
 {

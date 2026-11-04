@@ -26,6 +26,14 @@ void rtc_config_defaults(rtc_config *c)
 	c->send_priority = 9;
 	c->processes_every = 6;
 	c->max_processes = 4096;
+	snprintf(c->rmgr_path, sizeof(c->rmgr_path), "/dev/rtcollector");
+	c->rmgr_mode = 0660;
+	c->rmgr_group = 0;
+	c->rmgr_priority = 63;
+	c->rmgr_threads = 4;
+	c->rmgr_buffer_bytes = 256u << 10;
+	c->max_write_bytes = 4096;
+	c->rmgr_drain_bytes = 64u << 10;
 	c->buffer_bytes = 1u << 20;
 	c->max_record_bytes = 4096;
 	c->warn_on_buffer = true;
@@ -253,7 +261,44 @@ static void load_doc(ctx *x, rtc_config *c)
 				c->processes_every = t >= 0 && t <= 1000000 ? (unsigned)t : 0;
 			else
 				c->max_processes = t >= 0 && t <= 1e9 ? (uint64_t)t : 0;
-		} else if (!strcmp(k, "shutdown_timeout"))
+		} else if (!strcmp(k, "rmgr_path"))
+			get_str(x, v, "rmgr_path", c->rmgr_path, sizeof(c->rmgr_path));
+		else if (!strcmp(k, "rmgr_mode")) {
+			const char *m = scalar(v);
+			char *end = NULL;
+			long mode = m ? strtol(m, &end, 8) : -1;
+			if (!m || end == m || *end || mode < 0 || mode > 0777)
+				err(x, "rmgr_mode", "must be octal permission bits, such as 0660");
+			else
+				c->rmgr_mode = (unsigned)mode;
+		} else if (!strcmp(k, "rmgr_priority")) {
+			double t = 0;
+			get_num(x, v, "rmgr_priority", &t);
+			if (t < 1 || t > 253 || t != floor(t))
+				err(x, "rmgr_priority", "must be an integer from 1 to 253");
+			else
+				c->rmgr_priority = (int)t;
+		} else if (!strcmp(k, "rmgr_threads")) {
+			double t = 0;
+			get_num(x, v, "rmgr_threads", &t);
+			if (t < 1 || t > 16 || t != floor(t))
+				err(x, "rmgr_threads", "must be an integer from 1 to 16");
+			else
+				c->rmgr_threads = (unsigned)t;
+		} else if (!strcmp(k, "rmgr_group")) {
+			double t = -1;
+			get_num(x, v, "rmgr_group", &t);
+			if (t < 0 || t > 65535 || t != floor(t))
+				err(x, "rmgr_group", "must be a group id from 0 to 65535");
+			else
+				c->rmgr_group = (int)t;
+		} else if (!strcmp(k, "rmgr_buffer_bytes"))
+			get_size(x, v, "rmgr_buffer_bytes", &c->rmgr_buffer_bytes);
+		else if (!strcmp(k, "max_write_bytes"))
+			get_size(x, v, "max_write_bytes", &c->max_write_bytes);
+		else if (!strcmp(k, "rmgr_drain_bytes"))
+			get_size(x, v, "rmgr_drain_bytes", &c->rmgr_drain_bytes);
+		else if (!strcmp(k, "shutdown_timeout"))
 			get_num(x, v, "shutdown_timeout", &c->shutdown_timeout_s);
 		else if (!strcmp(k, "buffer_bytes"))
 			get_size(x, v, "buffer_bytes", &c->buffer_bytes);
@@ -432,6 +477,22 @@ int rtc_config_validate(rtc_config *c)
 	}
 	if (c->processes_every < 1 || c->processes_every > 1000000) {
 		RTC_ERROR(C, "processes_every: must be from 1 to 1000000");
+		bad++;
+	}
+	if (c->max_write_bytes < 64 || c->max_write_bytes > (64u << 10)) {
+		RTC_ERROR(C, "max_write_bytes: must be from 64 to 64KiB");
+		bad++;
+	}
+	if (c->rmgr_buffer_bytes < RTC_RING_HDR + c->max_write_bytes + 1) {
+		RTC_ERROR(C, "rmgr_buffer_bytes: must hold at least one write of max_write_bytes");
+		bad++;
+	}
+	if (c->rmgr_drain_bytes < c->max_write_bytes + 1 || c->rmgr_drain_bytes > (16u << 20)) {
+		RTC_ERROR(C, "rmgr_drain_bytes: must be from max_write_bytes to 16MiB");
+		bad++;
+	}
+	if (c->rmgr_path[0] != '/') {
+		RTC_ERROR(C, "rmgr_path: must be an absolute path");
 		bad++;
 	}
 	if (c->max_processes < 1 || c->max_processes > 1000000) {

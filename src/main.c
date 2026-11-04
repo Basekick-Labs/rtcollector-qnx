@@ -8,6 +8,10 @@
 #include "core/log.h"
 
 #include <curl/curl.h>
+#include <errno.h>
+#ifdef RTC_QNX
+#include <sys/mman.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -70,6 +74,13 @@ int main(int argc, char **argv)
 	sigaddset(&set, SIGTERM);
 
 	static rtc_collector col;
+#ifdef RTC_QNX
+	/* Keep every page resident: no page faults on the paths real-time
+	 * programs wait on. Needs root or PROCMGR_AID_MEM_LOCK; without it the
+	 * buffers are still pre-touched, only not locked. */
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+		RTC_WARN("main", "cannot lock memory (%s); continuing without", strerror(errno));
+#endif
 	if (rtc_collector_init(&col, &cfg) != 0) {
 		rtc_collector_destroy(&col);
 		curl_global_cleanup();

@@ -36,8 +36,31 @@ static int gather(rtc_collector *c)
 	F(&b, "processes_overflow", &k->processes_overflow);
 	F(&b, "processes_query_errors", &k->processes_query_errors);
 	F(&b, "priority_fallback", &k->priority_fallback);
+	F(&b, "rmgr_unavailable", &k->rmgr_unavailable);
+	F(&b, "rmgr_thread_deaths", &k->rmgr_thread_deaths);
 	rtc_rb_i64(&b, "buffer_bytes", clamp(c->ring.cap));
 	rtc_emit(c, &b);
+
+	if (atomic_load(&c->lp_ndrains)) { /* /dev/rtcollector is running */
+		rtc_rmgr_counters sum;
+		rtc_rmgr_sum(c, &sum);
+		const rtc_rmgr_counters *r = &sum;
+		rtc_rb_init(&b, c->scratch, c->cfg.max_record_bytes, "internal_rmgr");
+		F(&b, "writes", &r->writes);
+		F(&b, "bytes", &r->bytes);
+		F(&b, "dropped", &r->dropped);
+		F(&b, "drain_dropped", &k->rmgr_drain_dropped);
+		F(&b, "oversize", &r->oversize);
+		F(&b, "errors", &r->errors);
+		F(&b, "msgreads", &r->msgreads);
+		F(&b, "lines", &k->lp_lines);
+		F(&b, "malformed", &k->lp_malformed);
+		F(&b, "bad_timestamp", &k->lp_bad_timestamp);
+		F(&b, "too_large", &k->lp_too_large);
+		F(&b, "uint_dropped", &k->lp_uint_dropped);
+		F(&b, "max_writer_prio", &r->max_prio_seen);
+		rtc_emit(c, &b);
+	}
 
 	for (unsigned i = 0; i < c->noutputs; i++) {
 		const rtc_output *o = c->outputs[i];
@@ -62,4 +85,4 @@ static int gather(rtc_collector *c)
 	return 0;
 }
 
-const rtc_input_def rtc_input_internal = {"internal", NULL, gather};
+const rtc_input_def rtc_input_internal = {.name = "internal", .gather = gather};

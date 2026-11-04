@@ -58,6 +58,69 @@ tools (a CPU hog pinned to each core, `pidin` memory and process counts).
 | `cpu` (QNX) | `cpu`, tag `cpu` = `cpu0`…, `cpu-total` | `usage_percent`, `idle_percent`, from the run time of procnto's per-CPU idle threads. Needs no privileges. CPUs taken offline at run time are not handled |
 | `mem` (QNX) | `mem` | `total_bytes`, `free_bytes`, `used_bytes`, `used_percent` |
 | `processes` (QNX) | `processes` | `processes`, and `threads` when the collector may query other processes (root, or `PROCMGR_AID_XPROCESS_QUERY`). Without it, `internal_collector.procfs_denied` is 1 and only the process count is sent |
+| `rmgr` (QNX) | what programs write | `/dev/rtcollector`: any program publishes metrics by writing line protocol to it. See below |
+
+## Publishing from your program: `/dev/rtcollector`
+
+With `rmgr` in `inputs`, the collector registers `/dev/rtcollector`. Any QNX
+program publishes a metric by writing one line of
+[line protocol](https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/)
+per `write()`:
+
+```c
+#include "rtc_publish.h"   /* include/rtc_publish.h: header-only */
+
+int fd = open("/dev/rtcollector", O_WRONLY);
+rtc_publish(fd, "control_loop,axis=x jitter_us=%di,ok=true", jitter_us);
+```
+
+or, without the header, `snprintf` into a buffer and one `write()`. Shell:
+`echo 'pump,id=3 rpm=1450i' > /dev/rtcollector`.
+
+**Do not use `dprintf` or default-buffered stdio.** On QNX, `dprintf` sends
+literal text one character per `write()`, and buffered `fprintf` cuts lines
+at 1 KiB. The collector does not reassemble lines split across writes; such
+fragments are counted as malformed.
+
+What a write costs and what it promises:
+
+- The handler copies the bytes into a preallocated buffer and replies. It
+  runs on a small pool of threads (`rmgr_threads`, default 4) at a fixed
+  priority (`rmgr_priority`, default 63): set it above every thread that
+  writes. Measured on QEMU/KVM, all on one core: a priority-50 writer while a
+  priority-5 writer floods and a priority-30 CPU hog runs: p99 about 10 µs,
+  worst 43 µs over 5 runs. If the handler threads cannot get `rmgr_priority` (above 63 needs root or `PROCMGR_AID_PRIORITY`), the device is refused rather than served with that promise broken. (The Raspberry Pi measurement comes with the
+  jitter harness.)
+- Why a pool and a fixed priority, both learned on QNX 8: with priority
+  inheritance, a low-priority writer's handler ran at that writer's priority
+  and anything in between preempted it; and a low-priority writer preempted
+  in the middle of its send keeps the server thread it was being delivered
+  to. With one thread, a priority-50 writer waited 20–47 ms behind them.
+- While the collector runs, a write waits at most for one handler run per
+  writer ahead of it, unless more than `rmgr_threads` lower-priority writers
+  are preempted mid-send at the same moment. If the collector is stopped
+  (SIGSTOP), writes block. When it shuts down, writes fail at once with
+  `EBADF` (reopen the device after it restarts).
+- Writes longer than `max_write_bytes` fail with `EMSGSIZE`. Anything else
+  succeeds: data lost because a buffer is full is counted, never reported to
+  the writer.
+- Open the device once and keep it open: opens and closes go through the
+  same threads and allocate.
+- Lines are parsed on the collection thread, not in `write()`. Fields:
+  float, `123i` integer, `123u` unsigned (dropped if above 2^63−1), booleans
+  (`t`, `true`, `True`, `TRUE`, `f`, …), `"strings"`. No leading `+`, no NUL
+  bytes. An explicit timestamp must be in nanoseconds (others are refused and
+  counted); without one, the receive time is used. A tag `host` replaces the
+  collector's host tag. A line whose converted record exceeds
+  `max_record_bytes` is counted as `too_large`.
+- `cat /dev/rtcollector` prints one status line: writes, bytes, dropped,
+  oversize, lines, malformed, bad timestamps, too large, the highest writer
+  priority seen, and the handler priority and thread count.
+
+Registering a path needs root (or `PROCMGR_AID_PATHSPACE`); without it the
+collector runs without `/dev/rtcollector` and `rmgr_unavailable` is 1. A
+second collector refuses a path that is already registered. `--once` does not
+start it.
 
 ## Running
 
@@ -95,6 +158,14 @@ outputs:
 | `send_priority` | `9` | QNX: priority of the sender thread. With `--once` everything runs on the main thread and neither priority applies |
 | `processes_every` | `6` | Rounds between process scans (a scan costs about 50 µs per process) |
 | `max_processes` | `4096` | A scan stops here; `processes_overflow` is counted |
+| `rmgr_path` | `/dev/rtcollector` | Path of the device (input `rmgr`) |
+| `rmgr_mode` | `0660` | Its permissions, octal. `0666` lets any user publish (and flood) |
+| `rmgr_group` | `0` | Its group id |
+| `rmgr_buffer_bytes` | `256KiB` | Buffer between the device and the collection thread, per handler thread (memory = this × `rmgr_threads`) |
+| `rmgr_threads` | `4` | Handler threads for the device (1–16) |
+| `rmgr_priority` | `63` | Fixed priority of the device's handler threads: above every writer |
+| `max_write_bytes` | `4096` | Largest write accepted |
+| `rmgr_drain_bytes` | `64KiB` | Bytes converted per handler-thread buffer per collection-thread step (every 20 ms at most) |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |

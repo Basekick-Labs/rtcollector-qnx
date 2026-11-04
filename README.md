@@ -235,9 +235,9 @@ outputs:
 | `hostname` | system hostname | Value of the `host` tag on every row |
 | `tags` | none | Tags added to every row; they take precedence over tags an input sets |
 | `warn_on_buffer` | `true` | Log when records are dropped because the buffer was full |
-| `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; a request still running then is cut off, and whatever was not sent is counted as dropped |
+| `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; the outputs flush in parallel, each within this budget. A request still running then is cut off, and whatever was not sent is counted as dropped |
 | `collect_priority` | `10` | QNX: priority of the collection thread (SCHED_RR, 1–253). Keep it below your real-time threads. Above 63 needs root or `PROCMGR_AID_PRIORITY`; otherwise the thread keeps the inherited priority and `priority_fallback` is counted |
-| `send_priority` | `9` | QNX: priority of the sender thread. With `--once` everything runs on the main thread and neither priority applies |
+| `send_priority` | `9` | QNX: priority of the sender threads, one per output, so a destination that hangs never delays another. With `--once` everything runs on the main thread and neither priority applies |
 | `processes_every` | `6` | Rounds between process scans (a scan costs about 50 µs per process) |
 | `max_processes` | `4096` | A scan stops here; `processes_overflow` is counted |
 | `rmgr_path` | `/dev/rtcollector` | Path of the device (input `rmgr`) |
@@ -265,8 +265,8 @@ outputs:
 | `outputs.arc.batch_bytes` | `256KiB` | Bytes of records per request, at most (default capped at half of `buffer_bytes`) |
 | `outputs.arc.timeout` | `10` | Request timeout, seconds |
 | `outputs.arc.max_measurements_per_batch` | `64` | Distinct measurements per request (1 to 256) |
-| `outputs.stdout` | off | Print rows as line protocol, for debugging |
-| `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records per write |
+| `outputs.stdout` | off | Print rows as line protocol, for debugging. If nobody reads stdout (a full pipe), shutdown still ends within `shutdown_timeout`; the rows not written are counted as dropped |
+| `outputs.stdout.batch_bytes` | `64KiB` | Bytes of records read from the buffer per batch |
 
 `max_buffer_size` from rtcollector configurations is accepted and ignored:
 rtcollector counted single-value series, this collector buffers multi-field

@@ -10,6 +10,8 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #ifndef RTC_ASAN /* set by `make SANITIZE=1` */
 #define RTC_ASAN 0
@@ -464,7 +466,144 @@ static void shutdown_counts_unsent_as_dropped(void)
 	teardown();
 }
 
+/* One sender per output: Arc hanging on a request does not hold back stdout,
+ * and stop still ends within shutdown_timeout. */
+static void hung_arc_does_not_delay_stdout(void)
+{
+	fake_reply s[] = {{0, ""}};
+	setup_stdout = true;
+	CHECK(setup(s, 1, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.arc.timeout_ms = 30000;
+	R.c.cfg.shutdown_timeout_s = 0.5;
+	R.c.cfg.interval_s = 0.05;
+	R.c.cfg.flush_interval_s = 0.05;
+	FILE *saved = stdout;
+	stdout = fopen("/dev/null", "w");
+	CHECK(rtc_collector_start(&R.c) == 0);
+	for (int i = 0; i < 100 && fake_arc_requests(R.f) == 0; i++) {
+		struct timespec ts = {0, 20000000};
+		nanosleep(&ts, NULL);
+	}
+	CHECK_EQ_U(fake_arc_requests(R.f), 1); /* hanging now */
+	uint64_t before = rtc_counter_get(&R.c.outputs[1]->counters.records_sent);
+	struct timespec ts = {0, 400000000};
+	nanosleep(&ts, NULL);
+	uint64_t after = rtc_counter_get(&R.c.outputs[1]->counters.records_sent);
+	CHECK(after > before);
+	CHECK_EQ_U(fake_arc_requests(R.f), 1);
+	uint64_t t0 = rtc_mono_ns();
+	rtc_collector_stop(&R.c);
+	CHECK(since(t0) < 1.0);
+	fclose(stdout);
+	stdout = saved;
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[1]->counters.records_sent), gathered);
+	uint64_t accounted = rtc_counter_get(&K()->records_sent) + rtc_counter_get(&K()->records_dropped) +
+	                     rtc_counter_get(&K()->records_outcome_unknown);
+	CHECK_EQ_U(accounted, gathered);
+	teardown();
+	setup_stdout = false;
+}
+
+/* A thread that cannot start: the senders already running are stopped and
+ * joined before start returns, whichever thread failed. Each sender lingers
+ * 100 ms before it ends, so only a join makes sender_done true by then. */
+static void failed_start_unwinds_every_sender(void)
+{
+	setup_stdout = true;
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	unsigned nout = R.c.noutputs;
+	teardown();
+	/* Thread starts 1..nout are the senders, nout + 1 the collection thread. */
+	for (unsigned at = 2; at <= nout + 1; at++) {
+		CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+		R.c.cfg.flush_interval_s = 0.01;
+		R.c.fail_thread_at = at;
+		R.c.sender_exit_delay_ns = 100000000u;
+		emit("cpu", 3);
+		CHECK(rtc_collector_start(&R.c) == -1);
+		CHECK_EQ_U(R.c.nsend, 0);
+		CHECK(atomic_load(&R.c.stop));
+		for (unsigned i = 0; i < at - 1 && i < nout; i++)
+			CHECK(atomic_load(&R.c.outputs[i]->sender_done));
+		CHECK_EQ_U(rtc_counter_get(&K()->records_sent), 0);
+		CHECK_EQ_U(fake_arc_requests(R.f), 0);
+		teardown();
+	}
+	setup_stdout = false;
+}
+
+/* A stdout nobody reads (a full pipe) does not hold shutdown: its writes give
+ * up at the deadline, and what was not written is counted as dropped. */
+static void full_stdout_pipe_does_not_hold_shutdown(void)
+{
+	int fds[2];
+	CHECK(pipe(fds) == 0);
+	int fl = fcntl(fds[1], F_GETFL);
+	fcntl(fds[1], F_SETFL, fl | O_NONBLOCK);
+	char junk[4096];
+	memset(junk, 'x', sizeof(junk));
+	while (write(fds[1], junk, sizeof(junk)) > 0)
+		;
+	fcntl(fds[1], F_SETFL, fl); /* full, and blocking again */
+	setup_stdout = true;
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.interval_s = 0.02;
+	R.c.cfg.flush_interval_s = 0.02;
+	R.c.cfg.shutdown_timeout_s = 0.5;
+	FILE *saved = stdout;
+	stdout = fdopen(fds[1], "w");
+	CHECK(rtc_collector_start(&R.c) == 0);
+	struct timespec ts = {0, 300000000};
+	nanosleep(&ts, NULL);
+	uint64_t t0 = rtc_mono_ns();
+	rtc_collector_stop(&R.c);
+	double took = since(t0);
+	fprintf(stderr, "     stop with a full stdout took %.2fs\n", took);
+	CHECK(took < 1.0);
+	fclose(stdout);
+	stdout = saved;
+	close(fds[0]);
+	const rtc_output_counters *k = &R.c.outputs[1]->counters;
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK(gathered > 5);
+	CHECK_EQ_U(rtc_counter_get(&k->records_sent), 0);
+	CHECK_EQ_U(rtc_counter_get(&k->records_dropped), gathered);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), gathered); /* Arc unaffected */
+	teardown();
+	setup_stdout = false;
+}
+
+/* Each sender's final flush ignores flush_interval: stop sends everything
+ * gathered even when the next flush is far away. */
+static void stop_flushes_before_flush_interval(void)
+{
+	setup_stdout = true;
+	CHECK(setup(NULL, 0, 1 << 16, 1 << 14) == 0);
+	R.c.cfg.interval_s = 0.02;
+	R.c.cfg.flush_interval_s = 30;
+	R.c.cfg.shutdown_timeout_s = 1;
+	FILE *saved = stdout;
+	stdout = fopen("/dev/null", "w");
+	CHECK(rtc_collector_start(&R.c) == 0);
+	struct timespec ts = {0, 200000000};
+	nanosleep(&ts, NULL);
+	rtc_collector_stop(&R.c);
+	fclose(stdout);
+	stdout = saved;
+	uint64_t gathered = rtc_counter_get(&R.c.counters.records_gathered);
+	CHECK(gathered > 5);
+	CHECK_EQ_U(rtc_counter_get(&K()->records_sent), gathered);
+	CHECK_EQ_U(rtc_counter_get(&R.c.outputs[1]->counters.records_sent), gathered);
+	teardown();
+	setup_stdout = false;
+}
+
 const t_case lifecycle_cases[] = {
+    {"lifecycle", "stop_flushes_before_flush_interval", stop_flushes_before_flush_interval},
+    {"lifecycle", "hung_arc_does_not_delay_stdout", hung_arc_does_not_delay_stdout},
+    {"lifecycle", "failed_start_unwinds_every_sender", failed_start_unwinds_every_sender},
+    {"lifecycle", "full_stdout_pipe_does_not_hold_shutdown", full_stdout_pipe_does_not_hold_shutdown},
     {"lifecycle", "shutdown_counts_unsent_as_dropped", shutdown_counts_unsent_as_dropped},
     {"lifecycle", "shutdown_budget_bounds_a_hanging_request", shutdown_budget_bounds_a_hanging_request},
     {"lifecycle", "threads_deliver_and_stop_cleanly", threads_deliver_and_stop_cleanly},

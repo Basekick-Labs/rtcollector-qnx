@@ -384,11 +384,13 @@ static void start(rtc_collector *c)
 	 * happens next, everything accepted is drained (or counted at stop). */
 	c->lp_drains = st.drain;
 	atomic_store(&c->lp_ndrains, st.n);
-	uint64_t fallbacks = rtc_counter_get(&c->counters.priority_fallback);
+	bool fell_back = false;
 	for (unsigned i = 0; i < st.n; i++) {
-		if (rtc_start_thread(c, &st.thread[i], dispatch_main, (void *)(uintptr_t)i,
-		                     c->cfg.rmgr_priority, "rmgr") != 0)
+		bool fb;
+		if (rtc_start_thread_at(c, &st.thread[i], dispatch_main, (void *)(uintptr_t)i,
+		                        c->cfg.rmgr_priority, "rmgr", &fb) != 0)
 			break;
+		fell_back |= fb;
 		st.started++;
 	}
 	st.running = true;
@@ -397,7 +399,7 @@ static void start(rtc_collector *c)
 		stop(c);
 		return;
 	}
-	if (rtc_counter_get(&c->counters.priority_fallback) != fallbacks) {
+	if (fell_back) {
 		/* Handlers below rmgr_priority bring the priority inversion back:
 		 * refuse rather than serve writers with a broken promise. */
 		unavailable(c,

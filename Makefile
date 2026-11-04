@@ -102,7 +102,9 @@ $(BUILD)/rtc_tests: $(CORE_OBJ) $(TEST_OBJ) Makefile
 	$(CC) $(LDFLAGS) $(filter %.o,$^) $(LDLIBS) -o $@
 
 test: $(BUILD)/rtc_tests $(BUILD)/rtcollector
-	$(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'
+	@# pipefail here as well: GNU make 3.81 (macOS) ignores .SHELLFLAGS, and the
+	@# grep's status would hide failing tests.
+	set -o pipefail; $(BUILD)/rtc_tests 2>&1 | grep -vE ' (error|warn) (config|arc):'
 
 tsan:
 	$(MAKE) BUILD=build-tsan SANITIZE=thread build-tsan/rtc_tests

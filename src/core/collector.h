@@ -58,6 +58,7 @@ struct rtc_output {
 	bool draining; /* a flush is in progress: keep sending until the ring is empty */
 	uint64_t next_attempt_ns;
 	uint64_t backoff_ns;
+	_Atomic bool sender_done; /* set by its sender thread as its last act */
 
 	rtc_ring_accept accept; /* optional: limit what goes in one batch */
 	void (*batch_begin)(rtc_output *o);
@@ -91,7 +92,18 @@ struct rtc_collector {
 	/* Set at shutdown and in --once: in-flight requests are aborted once
 	 * CLOCK_MONOTONIC passes it. 0 = no limit. */
 	_Atomic uint64_t abort_after_ns;
-	pthread_t collect_thread, send_thread;
+	pthread_t collect_thread;
+	/* One sender thread per output (send_threads[i] runs outputs[i]), so a
+	 * destination that hangs never delays another. nsend: how many started. */
+	pthread_t send_threads[RTC_RING_MAX_OUTPUTS];
+	unsigned nsend;
+	/* Test seams. fail_thread_at: thread start number fail_thread_at
+	 * (1-based, counted in threads_started) fails as if pthread_create had,
+	 * 0 = never. sender_exit_delay_ns: each sender waits this long before it
+	 * ends, so a test can tell a joined sender from one merely told to stop. */
+	unsigned fail_thread_at;
+	_Atomic unsigned threads_started;
+	uint64_t sender_exit_delay_ns;
 };
 
 /* Builds everything from the configuration. Allocations happen here only.
@@ -101,7 +113,8 @@ void rtc_collector_destroy(rtc_collector *c);
 
 /* Threads. */
 int rtc_collector_start(rtc_collector *c);
-/* Stops collection, then lets the sender flush until shutdown_timeout. */
+/* Stops collection, then lets every output's sender flush, all within the
+ * same shutdown_timeout. */
 void rtc_collector_stop(rtc_collector *c);
 
 /* --once: one collection round and one send pass, no threads. Returns 0 if
@@ -115,6 +128,10 @@ void rtc_emit_record(rtc_collector *c, const uint8_t *rec, size_t len, uint64_t 
 /* Starts a thread at a fixed SCHED_RR priority on QNX (see collector.c). */
 int rtc_start_thread(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
                      const char *what);
+/* The same; *fell_back (if not NULL) tells whether this thread got the
+ * inherited priority instead of prio. */
+int rtc_start_thread_at(rtc_collector *c, pthread_t *t, void *(*fn)(void *), void *arg, int prio,
+                        const char *what, bool *fell_back);
 uint64_t rtc_now_ns(void);  /* CLOCK_REALTIME */
 uint64_t rtc_mono_ns(void); /* CLOCK_MONOTONIC */
 const char *rtc_hostname(const rtc_collector *c);
@@ -140,7 +157,9 @@ const rtc_input_def *rtc_input_find(const char *name);
 int rtc_output_arc_create(rtc_collector *c, unsigned idx, rtc_output **out);
 int rtc_output_stdout_create(rtc_collector *c, unsigned idx, rtc_output **out);
 
-/* Sender: one pass over the outputs. final: flush regardless of intervals.
+/* Sender for --once and tests: one pass over every output, on the calling
+ * thread. With threads, each output runs on its own sender instead.
+ * final: flush regardless of intervals.
  * deadline_ns bounds every request (0 = none). Returns true when no output
  * holds an unsent batch or pending ring data. */
 bool rtc_sender_pass(rtc_collector *c, bool final, uint64_t deadline_ns);

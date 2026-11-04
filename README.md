@@ -166,19 +166,25 @@ How it works and what it costs:
   drops events rather than wait (`kernel_dropped`). Bytes over
   `trace_max_bytes` in an interval are dropped (`bytes_dropped`); if the
   parser falls two intervals behind, the oldest file is dropped
-  (`files_dropped`). After any of these, and after a yield, the pending
+  (`files_dropped`). After any of these, after a file that could not be
+  parsed completely, and after a yield, the pending
   ready-to-running waits are forgotten: a gap never turns into a false
   latency.
 - Each CPU's events reach the file separately, so an event can arrive after a
   later one of the same thread; it is ignored and counted (`out_of_order`).
 - A thread whose exit was in dropped events would hold its table slot for
-  ever: a thread with no event for two intervals that is not ready or running
-  is dropped from the table (`threads_evicted`; if it runs again its row may
-  lack the thread name). New threads past the table's size are not tracked
+  ever. When the table is three-quarters full, threads with no event for two
+  intervals that are not ready or running are dropped from it, down to half
+  full (`threads_evicted`); if one runs again, its rows lack the thread name
+  (thread names are traced only when a thread is created or a session
+  starts). New threads past the table's size are not tracked
   (`threads_overflow` counts their events).
 - Files are removed once parsed, and on exit; files left by a collector that
-  was killed are removed by the next one's start. On shutdown, intervals not
-  yet parsed are dropped.
+  was killed, or by a parse that shutdown did not wait for, are removed by
+  the next collector's start. On shutdown, intervals not yet parsed are
+  dropped; the input's part of shutdown takes at most about 7 s (5 s for the
+  trace monitor, 2 s for a parse held off by busier threads), before
+  `shutdown_timeout`.
 - Only one process can trace at a time. When another tool asks for the trace
   (`tracelogger`, for example), the collector stops and gives it the trace
   (`yielded`), and starts again when it is done (`sessions`).
@@ -242,7 +248,7 @@ outputs:
 | `rmgr_priority` | `63` | Fixed priority of the device's handler threads: above every writer |
 | `max_write_bytes` | `4096` | Largest write accepted |
 | `rmgr_drain_bytes` | `64KiB` | Bytes converted per handler-thread buffer per collection-thread step (every 20 ms at most) |
-| `trace_interval` | `interval` (1 to 3600) | Seconds per trace interval (1–3600) |
+| `trace_interval` | `interval` (1 to 3600) | Seconds per trace interval (1–3600). Shorter than `interval`, intervals the collection rounds do not take are lost (`snapshots_lost`) |
 | `trace_priority` | `15` | QNX: priority of the threads that copy the kernel's events (1–253). Below it, busy real-time threads make the kernel drop events (counted) |
 | `trace_min_priority` | `40` | Threads at or above this priority are always reported |
 | `trace_top` | `16` | Lower-priority threads reported: the ones with the highest p99 (0–256) |

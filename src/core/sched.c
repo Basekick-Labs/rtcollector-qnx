@@ -119,6 +119,15 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 	rtc_sched_thread *t = find(s, e->pid, e->tid, true);
 	if (!t)
 		return;
+	/* Per-CPU kernel buffers are flushed independently, so at a file
+	 * rotation an older event can arrive after a newer one of the same
+	 * thread. Applying it would leave a stale READY behind (a bogus latency
+	 * of seconds later on): ignore it, and count it. */
+	if (e->t_ns < t->last_t) {
+		s->out_of_order++;
+		return;
+	}
+	t->last_t = e->t_ns;
 	if (e->prio > t->max_prio)
 		t->max_prio = e->prio;
 	switch (e->kind) {

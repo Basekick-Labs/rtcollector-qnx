@@ -55,6 +55,7 @@ typedef struct {
 	uint32_t pid, tid;
 	enum rtc_sched_kind state;
 	uint64_t ready_at, run_since;
+	uint64_t last_t; /* newest event applied: older ones arriving later are ignored */
 	char name[RTC_SCHED_NAME];
 	/* interval counters */
 	uint64_t wakeups, preemptions, run_ns;
@@ -78,6 +79,7 @@ typedef struct {
 	uint64_t vec_count[RTC_SCHED_MAX_VECTORS];
 	unsigned nvec;
 	uint64_t threads_overflow, vectors_overflow, events, drops;
+	uint64_t out_of_order; /* events older than the thread's newest, ignored */
 } rtc_sched;
 
 int rtc_sched_init(rtc_sched *s, size_t max_threads);

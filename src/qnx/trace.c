@@ -59,8 +59,8 @@ typedef struct {
 	rtc_counter sessions, yielded;        /* monitor thread */
 	rtc_counter bytes, bytes_dropped;     /* writer callback (tracer thread) */
 	rtc_counter intervals, files_dropped; /* rotator thread */
-	rtc_counter events, kernel_dropped, parse_ns, parse_errors, threads_overflow,
-	    snapshots_lost;      /* parser */
+	rtc_counter events, kernel_dropped, parse_ns, parse_errors, threads_overflow, snapshots_lost,
+	    out_of_order;        /* parser */
 	rtc_counter unavailable; /* set once, by whichever thread finds out */
 } trace_counters;
 
@@ -422,6 +422,7 @@ static void parse_file(const char *path)
 	rtc_counter_set(&st.k.parse_ns,
 	                (uint64_t)(z.tv_sec - a.tv_sec) * 1000000000u + (uint64_t)(z.tv_nsec - a.tv_nsec));
 	rtc_counter_set(&st.k.threads_overflow, st.sched.threads_overflow);
+	rtc_counter_set(&st.k.out_of_order, st.sched.out_of_order);
 
 	/* Publish this interval. */
 	rtc_sched_take(&st.sched, st.ncpu, st.c->cfg.trace_min_priority, st.c->cfg.trace_top,
@@ -606,6 +607,7 @@ static int gather(rtc_collector *c)
 	emit_u(&b, "parse_ns", rtc_counter_get(&st.k.parse_ns));
 	emit_u(&b, "parse_errors", rtc_counter_get(&st.k.parse_errors));
 	emit_u(&b, "threads_overflow", rtc_counter_get(&st.k.threads_overflow));
+	emit_u(&b, "out_of_order", rtc_counter_get(&st.k.out_of_order));
 	emit_u(&b, "threads_omitted", have ? st.out.threads_omitted : 0);
 	emit_u(&b, "snapshots_lost", rtc_counter_get(&st.k.snapshots_lost));
 	emit_u(&b, "unavailable", rtc_counter_get(&st.k.unavailable));

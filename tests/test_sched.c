@@ -163,7 +163,26 @@ static void interrupts(void)
 	rtc_sched_free(&S);
 }
 
+/* A late event from another CPU's buffer must not leave a stale READY. */
+static void out_of_order_ignored(void)
+{
+	CHECK(rtc_sched_init(&S, 16) == 0);
+	ev(0, 1000, 5, 1, RTC_EV_READY, 40);
+	ev(0, 1010, 5, 1, RTC_EV_RUNNING, 40);
+	ev(0, 1100, 5, 1, RTC_EV_BLOCKED, 40);
+	ev(1, 1005, 5, 1, RTC_EV_READY, 40);            /* late: older than the newest */
+	ev(0, 9000000000ull, 5, 1, RTC_EV_RUNNING, 40); /* would have been a 9 s latency */
+	rtc_sched_snapshot o;
+	rtc_sched_snapshot_init(&o, 4);
+	rtc_sched_take(&S, 2, 30, 2, &o);
+	CHECK(o.nrows == 1 && o.rows[0].max_ns == 10 && o.rows[0].wakeups == 1);
+	CHECK_EQ_U(S.out_of_order, 1);
+	rtc_sched_snapshot_free(&o);
+	rtc_sched_free(&S);
+}
+
 const t_case sched_cases[] = {
+    {"sched", "out_of_order_ignored", out_of_order_ignored},
     {"sched", "histogram", histogram},
     {"sched", "latency_preemption_runtime", latency_preemption_runtime},
     {"sched", "drops_reset_pending_state", drops_reset_pending_state},

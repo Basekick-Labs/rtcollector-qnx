@@ -40,7 +40,7 @@ static int gather(rtc_collector *c)
 	rtc_rb_i64(&b, "buffer_bytes", clamp(c->ring.cap));
 	rtc_emit(c, &b);
 
-	if (c->lp_drain) { /* /dev/rtcollector is running */
+	if (atomic_load(&c->lp_drain)) { /* /dev/rtcollector is running */
 		const rtc_rmgr_counters *r = &c->rmgr_counters;
 		rtc_rb_init(&b, c->scratch, c->cfg.max_record_bytes, "internal_rmgr");
 		F(&b, "writes", &r->writes);
@@ -48,11 +48,14 @@ static int gather(rtc_collector *c)
 		F(&b, "dropped", &r->dropped);
 		F(&b, "drain_dropped", &k->rmgr_drain_dropped);
 		F(&b, "oversize", &r->oversize);
+		F(&b, "errors", &r->errors);
+		F(&b, "msgreads", &r->msgreads);
 		F(&b, "lines", &k->lp_lines);
 		F(&b, "malformed", &k->lp_malformed);
 		F(&b, "bad_timestamp", &k->lp_bad_timestamp);
+		F(&b, "too_large", &k->lp_too_large);
 		F(&b, "uint_dropped", &k->lp_uint_dropped);
-		F(&b, "max_prio_seen", &r->max_prio_seen);
+		F(&b, "max_writer_prio", &r->max_prio_seen);
 		rtc_emit(c, &b);
 	}
 

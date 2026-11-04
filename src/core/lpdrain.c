@@ -32,7 +32,7 @@ static void one_line(rtc_collector *c, const char *s, size_t n, uint64_t recv_ts
 	unsigned dropped;
 	enum rtc_lp_result r =
 	    rtc_lp_parse(s, n, lim, c->scratch, c->cfg.max_record_bytes, &len, &ts, &dropped);
-	if (dropped)
+	if (dropped && (r == RTC_LP_OK || r == RTC_LP_NO_FIELDS))
 		rtc_counter_add(&c->counters.lp_uint_dropped, dropped);
 	switch (r) {
 	case RTC_LP_OK:
@@ -47,6 +47,9 @@ static void one_line(rtc_collector *c, const char *s, size_t n, uint64_t recv_ts
 		break;
 	case RTC_LP_BAD_TIMESTAMP:
 		rtc_counter_add(&c->counters.lp_bad_timestamp, 1);
+		break;
+	case RTC_LP_TOO_LARGE:
+		rtc_counter_add(&c->counters.lp_too_large, 1);
 		break;
 	}
 }

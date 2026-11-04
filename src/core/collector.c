@@ -72,6 +72,8 @@ int rtc_collector_init(rtc_collector *c, const rtc_config *cfg)
 	c->clock_floor_ns = ((uint64_t)RTC_BUILD_EPOCH - 86400u) * 1000000000u;
 	atomic_init(&c->abort_after_ns, 0);
 	atomic_init(&c->stop, false);
+	atomic_init(&c->stop_collect, false);
+	atomic_init(&c->lp_drain, NULL);
 
 	unsigned nout = (cfg->arc.enabled ? 1 : 0) + (cfg->out_stdout.enabled ? 1 : 0);
 	if (rtc_ring_init(&c->ring, cfg->buffer_bytes, cfg->max_record_bytes, nout) != 0) {
@@ -172,7 +174,7 @@ static void *collect_main(void *arg)
 	rtc_collector *c = arg;
 	uint64_t interval = (uint64_t)llround(c->cfg.interval_s * 1e9);
 	uint64_t next = rtc_mono_ns();
-	while (!atomic_load(&c->stop)) {
+	while (!atomic_load(&c->stop_collect)) {
 		gather_round(c);
 		next += interval;
 		uint64_t now = rtc_mono_ns();
@@ -185,14 +187,15 @@ static void *collect_main(void *arg)
 		/* The deadline is absolute (previous deadline + interval), so drift does
 		 * not accumulate. Sleep toward it in short slices so stop is honoured
 		 * promptly; macOS has no clock_nanosleep(TIMER_ABSTIME). */
-		while (!atomic_load(&c->stop)) {
+		while (!atomic_load(&c->stop_collect)) {
 			/* Convert what /dev/rtcollector received; bounded per step. */
-			if (c->lp_drain)
-				rtc_lp_drain_step(c, c->lp_drain);
+			rtc_lp_drain *lpd = atomic_load(&c->lp_drain);
+			if (lpd)
+				rtc_lp_drain_step(c, lpd);
 			uint64_t n = rtc_mono_ns();
 			if (n >= next)
 				break;
-			uint64_t max_slice = c->lp_drain ? 20000000u : 100000000u;
+			uint64_t max_slice = lpd ? 20000000u : 100000000u;
 			uint64_t slice = next - n < max_slice ? next - n : max_slice;
 			struct timespec s = {(time_t)(slice / 1000000000u), (long)(slice % 1000000000u)};
 			nanosleep(&s, NULL);
@@ -200,10 +203,11 @@ static void *collect_main(void *arg)
 	}
 	/* The resource manager has stopped (rtc_collector_stop stops it first):
 	 * convert what it received, then count anything left as dropped. */
-	if (c->lp_drain) {
-		for (int i = 0; i < 1024 && rtc_lp_drain_step(c, c->lp_drain) > 0; i++)
+	rtc_lp_drain *lpd = atomic_load(&c->lp_drain);
+	if (lpd) {
+		for (int i = 0; i < 1024 && rtc_lp_drain_step(c, lpd) > 0; i++)
 			;
-		uint64_t left = rtc_ring_unseen(c->lp_drain->ring, 0);
+		uint64_t left = rtc_ring_unseen(lpd->ring, 0);
 		if (left)
 			rtc_counter_add(&c->counters.rmgr_drain_dropped, left);
 	}
@@ -380,6 +384,7 @@ int rtc_collector_start(rtc_collector *c)
 	if (rc != 0) {
 		RTC_ERROR(C, "cannot start the collection thread: %s", strerror(rc));
 		atomic_store(&c->abort_after_ns, rtc_mono_ns());
+		atomic_store(&c->stop_collect, true);
 		atomic_store(&c->stop, true);
 		pthread_join(c->send_thread, NULL);
 		return -1;
@@ -398,10 +403,29 @@ void rtc_collector_stop(rtc_collector *c)
 	 * passes, even though it was started without one. */
 	uint64_t budget = (uint64_t)llround(c->cfg.shutdown_timeout_s * 1e9);
 	atomic_store(&c->abort_after_ns, rtc_mono_ns() + (budget ? budget : 1));
-	atomic_store(&c->stop, true);
+	/* The collection thread ends first (its final drain may still push
+	 * records), then the sender flushes what it left. */
+	atomic_store(&c->stop_collect, true);
 	pthread_join(c->collect_thread, NULL);
+	atomic_store(&c->stop, true);
 	pthread_join(c->send_thread, NULL);
 	rtc_collector_account_unsent(c, true);
+	if (atomic_load(&c->lp_drain)) {
+		/* The internal input no longer runs: report the device's totals here. */
+		const rtc_rmgr_counters *r = &c->rmgr_counters;
+		const rtc_collect_counters *k = &c->counters;
+		RTC_INFO("rmgr",
+		         "%s totals: writes=%llu lines=%llu malformed=%llu bad_timestamp=%llu too_large=%llu "
+		         "dropped=%llu oversize=%llu",
+		         c->cfg.rmgr_path, (unsigned long long)rtc_counter_get(&r->writes),
+		         (unsigned long long)rtc_counter_get(&k->lp_lines),
+		         (unsigned long long)rtc_counter_get(&k->lp_malformed),
+		         (unsigned long long)rtc_counter_get(&k->lp_bad_timestamp),
+		         (unsigned long long)rtc_counter_get(&k->lp_too_large),
+		         (unsigned long long)(rtc_counter_get(&r->dropped) +
+		                              rtc_counter_get(&k->rmgr_drain_dropped)),
+		         (unsigned long long)rtc_counter_get(&r->oversize));
+	}
 }
 
 static uint64_t losses(const rtc_collector *c)

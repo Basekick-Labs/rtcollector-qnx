@@ -90,6 +90,11 @@ int main(int argc, char **argv)
 			usleep((useconds_t)sleep_us);
 	}
 	if (lat) {
+		long worst = 0;
+		for (long i = 1; i < n; i++)
+			if (lat[i] > lat[worst])
+				worst = i;
+		printf("worst_index=%ld worst_us=%.1f\n", worst, lat[worst] / 1e3);
 		qsort(lat, (size_t)n, sizeof(*lat), cmp);
 		printf("writes=%ld failed=%d p50_us=%.1f p99_us=%.1f max_us=%.1f\n", n, failed,
 		       lat[n / 2] / 1e3, lat[(size_t)(n * 99 / 100)] / 1e3, lat[n - 1] / 1e3);

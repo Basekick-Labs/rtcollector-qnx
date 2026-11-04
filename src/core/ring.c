@@ -22,6 +22,10 @@ int rtc_ring_init(rtc_ring *r, size_t cap_bytes, uint32_t max_record, unsigned n
 	r->buf = malloc((size_t)cap);
 	if (!r->buf)
 		return -1;
+	/* Touch every page now: a page fault later would happen on the path a
+	 * writer waits on, and resolving it can wait on locks held by
+	 * lower-priority threads. */
+	memset(r->buf, 0, (size_t)cap);
 	r->cap = cap;
 	r->max_record = max_record;
 	r->noutputs = noutputs;

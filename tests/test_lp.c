@@ -96,6 +96,8 @@ static void refused(void)
 	    "m v=-",                     /* a sign, no digits */
 	    "m v=.",                     /* a point, no digits */
 	    "m v=e5",                    /* an exponent, no digits */
+	    "m v=+1",                    /* InfluxDB refuses a leading + */
+	    "m v=+2i",                   /* also for integers */
 	};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
 		enum rtc_lp_result r = parse(bad[i], NULL, NULL, NULL);
@@ -146,6 +148,11 @@ static void bounds(void)
 	uint64_t ts;
 	unsigned d;
 	CHECK(rtc_lp_parse("measurement v=1", 15, &LIM, small, sizeof(small), &len, &ts, &d) ==
+	      RTC_LP_TOO_LARGE);
+	/* NUL bytes would cut names and strings: refused. */
+	CHECK(rtc_lp_parse("m s=\"ab\0cd\"", 12, &LIM, small, sizeof(small), &len, &ts, &d) ==
+	      RTC_LP_MALFORMED);
+	CHECK(rtc_lp_parse("m,t\0x=1 v=1", 12, &LIM, small, sizeof(small), &len, &ts, &d) ==
 	      RTC_LP_MALFORMED);
 }
 

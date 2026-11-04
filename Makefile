@@ -126,9 +126,12 @@ ARCH ?= x86_64
 qnx:
 	@test -n "$(QNX_TARGET)" || { echo "source qnxsdp-env.sh first"; exit 1; }
 	$(MAKE) PLATFORM=qnx BUILD=build-qnx-$(ARCH) CC="qcc -Vgcc_nto$(ARCH)" \
-	  build-qnx-$(ARCH)/rtcollector build-qnx-$(ARCH)/rtc_writer
+	  build-qnx-$(ARCH)/rtcollector build-qnx-$(ARCH)/rtc_writer build-qnx-$(ARCH)/rtc_hog
 
 $(BUILD)/rtc_writer: tests/qnx/rtc_writer.c include/rtc_publish.h
+	$(CC) $(CFLAGS) $< -o $@
+
+$(BUILD)/rtc_hog: tests/qnx/rtc_hog.c
 	$(CC) $(CFLAGS) $< -o $@
 
 clean:

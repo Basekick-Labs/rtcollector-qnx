@@ -8,6 +8,7 @@ static void put(rtc_rec_builder *b, const void *p, size_t n)
 		return;
 	if (n > b->cap - b->len) {
 		b->failed = true;
+		b->overflow = true;
 		return;
 	}
 	memcpy(b->buf + b->len, p, n);

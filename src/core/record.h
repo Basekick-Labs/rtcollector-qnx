@@ -62,6 +62,7 @@ typedef struct {
 	uint8_t nfields;
 	bool in_fields;
 	bool failed;
+	bool overflow; /* failed because the buffer was too small */
 } rtc_rec_builder;
 
 /* Start a record. Tags must all be added before the first field. */

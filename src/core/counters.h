@@ -52,9 +52,12 @@ typedef struct {
 	rtc_counter lp_lines;
 	rtc_counter lp_malformed;
 	rtc_counter lp_bad_timestamp;
+	rtc_counter lp_too_large; /* a line whose record exceeds max_record_bytes */
 	rtc_counter lp_uint_dropped;
 	rtc_counter rmgr_drain_dropped; /* writes overwritten before the drain read them */
-	rtc_counter rmgr_unavailable;   /* 1: /dev/rtcollector could not be registered */
+	/* Written by the main thread at start (before the collection thread
+	 * reads them) or by the rmgr thread, not the collection thread: */
+	rtc_counter rmgr_unavailable; /* 1: /dev/rtcollector could not be registered */
 } rtc_collect_counters;
 
 /* Written by the resource manager thread (/dev/rtcollector). */
@@ -63,7 +66,9 @@ typedef struct {
 	rtc_counter bytes;
 	rtc_counter dropped; /* ring full inside a claim: newest dropped */
 	rtc_counter oversize;
-	rtc_counter max_prio_seen; /* highest writer priority handled */
+	rtc_counter errors;        /* a write's data could not be read (EFAULT) */
+	rtc_counter msgreads;      /* writes not fully in the receive buffer (MsgRead used) */
+	rtc_counter max_prio_seen; /* highest writer priority seen */
 } rtc_rmgr_counters;
 
 /* Written by the sender thread, one set per output. */

@@ -107,6 +107,12 @@ static void invalid_values_are_refused(void)
 	    "collect_priority: 10.5\noutputs: [stdout]\n",
 	    "processes_every: 0\noutputs: [stdout]\n",
 	    "collect_priority: 1e20\noutputs: [stdout]\n",
+	    "rmgr_mode: ''\noutputs: [stdout]\n",
+	    "rmgr_mode: 0999\noutputs: [stdout]\n",
+	    "rmgr_priority: 254\noutputs: [stdout]\n",
+	    "max_write_bytes: 32\noutputs: [stdout]\n",
+	    "rmgr_drain_bytes: 32MiB\noutputs: [stdout]\n",
+	    "rmgr_path: dev/x\noutputs: [stdout]\n",
 	    "max_processes: 0\noutputs: [stdout]\n",
 	};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {

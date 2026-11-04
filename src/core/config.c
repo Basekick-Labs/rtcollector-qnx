@@ -29,6 +29,7 @@ void rtc_config_defaults(rtc_config *c)
 	snprintf(c->rmgr_path, sizeof(c->rmgr_path), "/dev/rtcollector");
 	c->rmgr_mode = 0660;
 	c->rmgr_group = 0;
+	c->rmgr_priority = 63;
 	c->rmgr_buffer_bytes = 256u << 10;
 	c->max_write_bytes = 4096;
 	c->rmgr_drain_bytes = 64u << 10;
@@ -265,10 +266,17 @@ static void load_doc(ctx *x, rtc_config *c)
 			const char *m = scalar(v);
 			char *end = NULL;
 			long mode = m ? strtol(m, &end, 8) : -1;
-			if (!m || *end || mode < 0 || mode > 0777)
+			if (!m || end == m || *end || mode < 0 || mode > 0777)
 				err(x, "rmgr_mode", "must be octal permission bits, such as 0660");
 			else
 				c->rmgr_mode = (unsigned)mode;
+		} else if (!strcmp(k, "rmgr_priority")) {
+			double t = 0;
+			get_num(x, v, "rmgr_priority", &t);
+			if (t < 1 || t > 253 || t != floor(t))
+				err(x, "rmgr_priority", "must be an integer from 1 to 253");
+			else
+				c->rmgr_priority = (int)t;
 		} else if (!strcmp(k, "rmgr_group")) {
 			double t = -1;
 			get_num(x, v, "rmgr_group", &t);
@@ -471,8 +479,8 @@ int rtc_config_validate(rtc_config *c)
 		RTC_ERROR(C, "rmgr_buffer_bytes: must hold at least one write of max_write_bytes");
 		bad++;
 	}
-	if (c->rmgr_drain_bytes < c->max_write_bytes + 1) {
-		RTC_ERROR(C, "rmgr_drain_bytes: must be at least max_write_bytes");
+	if (c->rmgr_drain_bytes < c->max_write_bytes + 1 || c->rmgr_drain_bytes > (16u << 20)) {
+		RTC_ERROR(C, "rmgr_drain_bytes: must be from max_write_bytes to 16MiB");
 		bad++;
 	}
 	if (c->rmgr_path[0] != '/') {

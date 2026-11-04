@@ -72,7 +72,7 @@ struct rtc_collector {
 	rtc_collect_counters counters;
 	rtc_rmgr_counters rmgr_counters;
 	/* Set by the rmgr input: raw writes the collection thread converts. */
-	rtc_lp_drain *lp_drain;
+	_Atomic(rtc_lp_drain *) lp_drain;
 	uint8_t *scratch; /* max_record_bytes, collection thread only */
 
 	const rtc_input_def *inputs[RTC_CFG_MAX_INPUTS];
@@ -81,7 +81,8 @@ struct rtc_collector {
 	unsigned noutputs;
 
 	uint64_t clock_floor_ns;
-	_Atomic bool stop;
+	_Atomic bool stop_collect; /* collection thread: stop (set first) */
+	_Atomic bool stop; /* sender: final flush, then stop (set after the collection thread ended) */
 	/* Set at shutdown and in --once: in-flight requests are aborted once
 	 * CLOCK_MONOTONIC passes it. 0 = no limit. */
 	_Atomic uint64_t abort_after_ns;

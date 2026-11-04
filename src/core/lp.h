@@ -7,6 +7,7 @@
  * t|T|true|True|TRUE|f|F|false|False|FALSE, "string" with \" and \\.
  * Escapes: measurement \, and \space; tag keys, tag values and field keys
  * \, \= and \space. Timestamp: nanoseconds only, within [floor, ceiling].
+ * A line containing a NUL byte is refused; numbers take no leading +.
  */
 #ifndef RTC_LP_H
 #define RTC_LP_H
@@ -22,6 +23,7 @@ enum rtc_lp_result {
 	RTC_LP_MALFORMED,     /* syntax, bounds or an unparsable value */
 	RTC_LP_BAD_TIMESTAMP, /* not a nanosecond time within [floor, ceiling] */
 	RTC_LP_NO_FIELDS,     /* every field was dropped (uint out of range) */
+	RTC_LP_TOO_LARGE,     /* valid, but its record exceeds the output buffer */
 };
 
 typedef struct {

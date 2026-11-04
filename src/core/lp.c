@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TOK_MAX 1024 /* longest name, value or number token */
+#define TOK_MAX 4096 /* longest name, value or number token (a line is at most a write) */
 
 typedef struct {
 	const char *p;
@@ -35,7 +35,7 @@ static bool is_decimal(const char *s)
 {
 	const char *p = s;
 	bool digits = false;
-	if (*p == '-' || *p == '+')
+	if (*p == '-') /* InfluxDB refuses a leading + */
 		p++;
 	while (*p >= '0' && *p <= '9') {
 		p++;
@@ -65,7 +65,7 @@ static bool is_decimal(const char *s)
 static bool is_integer(const char *s, size_t n, bool allow_sign)
 {
 	size_t i = 0;
-	if (allow_sign && n > 0 && (s[0] == '-' || s[0] == '+'))
+	if (allow_sign && n > 0 && s[0] == '-')
 		i = 1;
 	if (i == n)
 		return false;
@@ -102,6 +102,10 @@ enum rtc_lp_result rtc_lp_parse(const char *line, size_t len, const rtc_lp_limit
 		c.end--;
 	if (c.p == c.end || *c.p == '#')
 		return RTC_LP_EMPTY;
+	/* A NUL would silently cut names and strings (the record builder takes
+	 * C strings): refuse the line. */
+	if (memchr(c.p, '\0', (size_t)(c.end - c.p)))
+		return RTC_LP_MALFORMED;
 
 	if (token(&c, ", ", ", ", key) < 0)
 		return RTC_LP_MALFORMED;
@@ -214,9 +218,11 @@ enum rtc_lp_result rtc_lp_parse(const char *line, size_t len, const rtc_lp_limit
 
 	if (nfields == 0)
 		return *uint_dropped ? RTC_LP_NO_FIELDS : RTC_LP_MALFORMED;
+	if (b.overflow)
+		return RTC_LP_TOO_LARGE; /* the record does not fit max_record_bytes */
 	size_t l = rtc_rb_finish(&b);
 	if (l == 0)
-		return RTC_LP_MALFORMED; /* too long, too many tags or fields */
+		return RTC_LP_MALFORMED; /* too many tags or fields */
 	*rec_len = l;
 	return RTC_LP_OK;
 }

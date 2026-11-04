@@ -42,6 +42,12 @@ static void quantiles_never_understate(void)
 	CHECK_EQ_U(ls_quantile(&h, 1.0), 7000000000ull);
 	CHECK_EQ_U(ls_above(&h, 991000), 11); /* 991.5 .. 1000.5 us, and 7 s */
 	CHECK_EQ_U(ls_above(&h, 20000), 982);
+	/* A fractional rank rounds up: the median of 3 values is the 2nd. */
+	ls_init(&h);
+	ls_add(&h, 1500);
+	ls_add(&h, 2500);
+	ls_add(&h, 3500);
+	CHECK_EQ_U(ls_quantile(&h, 0.5), 3000);
 }
 
 static void merge_pools_runs(void)

@@ -203,11 +203,17 @@ def self_test():
         run("04-S3", [(10000, 998), (90000, 2)])
         run("05-Cplus", [(10000, 990), (30000, 10)])
         run("06-S1", [(10000, 1000)])
+        run("07-S2", [(10000, 1000)], misses=1)              # a miss the baseline never had
+        run("08-S2d", [(10000, 999), (20000, 1)])  # max 7 us over the baseline, slack is 6
+        run("09-S4", [(10000, 999), (17000, 1)])   # 4 us over: within the slack
         r = collect(d)
         assert r["S1"]["runs"] == 2 and r["S1"]["hist"]["resp"].n == 2000
         out = report(r)
         assert "- S1: pass" in out, out
         assert "- S3: FAIL" in out, out
+        assert "- S2: FAIL" in out, out
+        assert "- S2d: FAIL" in out, out
+        assert "- S4: pass" in out, out
         assert "Positive control" in out and "detected" in out and "NOT" not in out, out
     print("rtc-bench-report self-test ok")
 

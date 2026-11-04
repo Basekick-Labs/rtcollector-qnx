@@ -224,9 +224,9 @@ outputs:
 | `trace_interval` | `interval` (at least 1) | Seconds per trace interval (1–3600) |
 | `trace_priority` | `15` | QNX: priority of the threads that copy the kernel's events (1–253). Below it, busy real-time threads make the kernel drop events (counted) |
 | `trace_min_priority` | `40` | Threads at or above this priority are always reported |
-| `trace_top` | `16` | Lower-priority threads reported: the ones with the highest p99 |
-| `trace_max_rows` | `64` | `sched` rows per interval, at most |
-| `trace_max_threads` | `1024` | Threads tracked at once; more are counted in `threads_overflow` |
+| `trace_top` | `16` | Lower-priority threads reported: the ones with the highest p99 (0–1024) |
+| `trace_max_rows` | `64` | `sched` rows per interval, at most (1–4096) |
+| `trace_max_threads` | `1024` | Threads tracked at once (16–65536); more are counted in `threads_overflow` |
 | `trace_max_bytes` | `4MiB` | Trace bytes kept per interval (64KiB–256MiB) |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |

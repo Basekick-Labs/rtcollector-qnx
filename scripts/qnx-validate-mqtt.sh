@@ -53,7 +53,16 @@ q() { curl -s -X POST "$ARC/api/v1/query" -H 'Content-Type: application/json' -d
 d=json.load(sys.stdin); r=(d.get("data") or [[None]])[0]
 print(" ".join(str(x) for x in r) if d.get("success") else "ERR " + str(d.get("error"))[:200])'; }
 # wait_rows TABLE N: polls until count(*) >= N (Arc buffers before it writes)
-wait_rows() { local n; for _ in $(seq 40); do n=$(q "SELECT count(*) FROM $1" | tr -dc '0-9'); [ "${n:-0}" -ge "$2" ] && break; sleep 0.5; done; echo "${n:-0}"; }
+wait_rows() {
+	local n raw
+	for _ in $(seq 40); do
+		raw=$(q "SELECT count(*) FROM $1"); n=$(echo "$raw" | grep -E '^[0-9]+$')
+		[ "${n:-0}" -ge "$2" ] && break
+		sleep 0.5
+	done
+	[ -n "$n" ] || echo "     ($1: Arc answered: $raw)" >&2
+	echo "${n:-0}"
+}
 curl -fsS "$ARC/api/v1/mqtt/health" >/dev/null || { echo "Arc MQTT API not reachable at $ARC"; exit 2; }
 if ! curl -s "$ARC/api/v1/mqtt/subscriptions" | grep -q '"rtcollector/+/+"'; then
 	curl -s -X POST "$ARC/api/v1/mqtt/subscriptions" -H 'Content-Type: application/json' -d '{"name":"rtc","broker":"tcp://127.0.0.1:18830","client_id":"arc-rtc-sub","topics":["rtcollector/+/+"],"qos":1,"database":"mqtt","username":"rtc","password":"rtcpass","auto_start":true}' >/dev/null

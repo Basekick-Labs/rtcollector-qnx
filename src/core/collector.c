@@ -367,7 +367,9 @@ static void *send_main(void *arg)
 /* Stops and joins every sender started so far. Untimed on purpose: an output
  * is freed after this, so no sender may still be running. The bound comes
  * from every blocking call of an output honouring abort_after_ns (Arc's
- * requests, stdout's writes). */
+ * requests, stdout's writes, MQTT's socket waits). Name lookups are the
+ * exception: one already running when shutdown starts is waited for (Arc's
+ * libcurl resolver and MQTT's getaddrinfo alike; see the README). */
 static void join_senders(rtc_collector *c)
 {
 	atomic_store(&c->stop, true);

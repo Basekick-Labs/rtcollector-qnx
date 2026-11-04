@@ -309,7 +309,7 @@ the row's tags and never changes the topic.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `url` | required | `mqtt://host` or `mqtt://host:port` (default port 1883); `mqtt://[::1]` for IPv6. `mqtts://` is not in this build yet |
+| `url` | required | `mqtt://host` or `mqtt://host:port` (default port 1883); `mqtt://[::1]` for IPv6. `mqtts://` is not in this build yet. A name is resolved at start and again after a failed connection; each address gets its share of `timeout`. A lookup in progress when shutdown starts is waited for, so shutdown can take longer than `shutdown_timeout` with a slow DNS: use an address where that matters |
 | `topic` | `rtcollector/{host}/{measurement}` | Topic template. `{measurement}` may appear once. Refused: `+`, `#`, a leading `$`, other `{placeholders}`, over 1024 bytes. Warned: empty levels, more than 8 levels or over 256 bytes (AWS IoT refuses those) |
 | `format` | `msgpack` | `msgpack` or `json`. Use `msgpack` into Arc |
 | `time_precision` | `us` | Unit of `t`: `ns`, `us`, `ms` or `s`. Arc stores microseconds; with `json`, `ns` exceeds what a JSON number holds exactly |
@@ -341,18 +341,23 @@ message its ACL denies, and loses acknowledged messages on a restart unless
 **When the broker closes the connection.** MQTT has no "too large" answer: a
 broker over its packet limit (mosquitto's `max_packet_size`) closes the
 connection instead. After a close during or after a PUBLISH, the rows are
-sent again in messages of at most half that size, and the size grows back
-after 32 acknowledged messages. A single row closed three times in a row,
-each time on a new connection, is dropped (`records_rejected`) and the log
-says why: the broker's packet limit, its ACL, or another client with the same
-id.
+sent again at once in messages of at most half that size, down to one row
+per message, and the size grows back after 32 acknowledged messages. A single
+row closed three times in a row, each time on a new connection, is dropped
+(`records_rejected`) and the log says why: the broker's packet limit, its
+ACL, or another client with the same id. A broker that refuses a whole topic
+(an ACL that closes the connection, as AWS IoT does) therefore costs every
+row of that measurement three closes, and holds back the measurements queued
+behind it meanwhile: fix the ACL, or the topic.
 
 **Presence.** With `status_topic` set, the broker keeps a retained message on
 that topic: `online` once connected, `offline` after a clean stop. If the
 collector dies or loses the network, the broker publishes `offline` itself
 (the CONNECT's will). There is no presence under `--once`. The topic may not
 be one a measurement would use; by default it is one level up, so
-`rtcollector/#` sees both and `rtcollector/+/+` sees only data.
+`rtcollector/#` sees both and `rtcollector/+/+` sees only data. A broker that
+refuses the presence message refuses the connection: no data goes until the
+topic is allowed or `status_topic` is `''` (logged as an error).
 
 **Into Arc.** Arc subscribes to the broker and decodes these rows as they are.
 Create one subscription (`POST /api/v1/mqtt/subscriptions`) with

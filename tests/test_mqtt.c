@@ -307,21 +307,19 @@ static void small_ceiling(rtc_config *c)
 	c->mqtt.max_message_bytes = 1 << 16;
 }
 
-/* A close after a PUBLISH: the rows are sent again (records_resent) and
- * messages are cut at half that size; 32 acknowledged messages later the
- * ceiling doubles. */
+/* A close after a PUBLISH: the rows are sent again at once, without a
+ * backoff (records_resent), in messages of at most half that size. */
 static void close_after_publish_resends_and_cuts(void)
 {
 	fb_script s = {.action = {FB_CLOSE}, .naction = 1};
 	CHECK(setup(&s, small_ceiling) == 0);
 	emit("cpu", 200);
 	O()->next_attempt_ns = 0;
-	CHECK(!rtc_sender_pass(&C, true, 0));
-	CHECK_EQ_U(K(&O()->counters.records_sent), 0);
+	CHECK(rtc_sender_pass(&C, true, 0)); /* one pass: no backoff after a cut */
+	CHECK_EQ_U(K(&O()->counters.retries), 0);
 	fb_pub p;
 	CHECK(data_pub(0, &p));
 	size_t first = p.len;
-	CHECK(drain(20));
 	CHECK_EQ_U(K(&O()->counters.records_sent), 200);
 	CHECK_EQ_U(K(&O()->counters.records_resent), 200);
 	CHECK(ndata() >= 3);
@@ -366,21 +364,60 @@ static void tiny_packets(rtc_config *c)
 }
 
 /* A row the broker always refuses (its packet limit): dropped after exactly
- * 3 closes, each on a fresh connection. */
+ * 3 closes, each on a fresh connection. The first close cuts the ceiling
+ * (retried at once), the second does not (backoff). */
 static void one_row_exit_after_three_closes(void)
 {
 	fb_script s = {.max_packet = 40};
 	CHECK(setup(&s, tiny_packets) == 0);
 	emit("cpu", 1);
-	for (int i = 0; i < 2; i++) {
-		O()->next_attempt_ns = 0;
-		CHECK(!rtc_sender_pass(&C, true, 0));
-	}
+	O()->next_attempt_ns = 0;
+	CHECK(!rtc_sender_pass(&C, true, 0));
+	CHECK_EQ_U(fb_connects(B), 2);
 	CHECK_EQ_U(K(&O()->counters.records_rejected), 0); /* not after 2 */
 	CHECK(drain(3));
 	CHECK_EQ_U(fb_connects(B), 3);
 	CHECK_EQ_U(K(&O()->counters.records_rejected), 1);
 	CHECK_EQ_U(K(&O()->counters.records_sent), 0);
+	teardown();
+}
+
+/* A broker that closes on every message (an ACL on the topic): messages
+ * shrink to one row, and each row goes after 3 closes; the output moves on. */
+static void broker_closing_everything_still_progresses(void)
+{
+	fb_script s = {.naction = 64};
+	for (int i = 0; i < 64; i++)
+		s.action[i] = FB_CLOSE;
+	CHECK(setup(&s, tiny_packets) == 0);
+	emit("cpu", 20);
+	emit("mem", 1);
+	for (int i = 0; i < 80 && K(&O()->counters.records_rejected) < 3; i++) {
+		O()->next_attempt_ns = 0;
+		rtc_sender_pass(&C, true, 0);
+	}
+	CHECK(K(&O()->counters.records_rejected) >= 3);
+	CHECK_EQ_U(K(&O()->counters.records_sent), 0);
+	teardown();
+}
+
+/* Out of time before a message starts: nothing is published, the rows are
+ * kept (and counted as dropped at shutdown), as for Arc. */
+static void out_of_time_before_start_publishes_nothing(void)
+{
+	fb_script s = {0};
+	CHECK(setup(&s, NULL) == 0);
+	emit("cpu", 1);
+	CHECK(drain(5)); /* connected */
+	emit("cpu", 3);
+	uint64_t past = rtc_mono_ns() - 1;
+	atomic_store(&C.abort_after_ns, past);
+	size_t before = ndata();
+	CHECK(!rtc_sender_pass(&C, true, past));
+	CHECK_EQ_U(ndata(), before);
+	CHECK_EQ_U(K(&O()->counters.records_outcome_unknown), 0);
+	rtc_collector_account_unsent(&C, false);
+	CHECK_EQ_U(K(&O()->counters.records_dropped), 3);
 	teardown();
 }
 
@@ -705,6 +742,7 @@ static void config_validation(void)
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://u:p@broker}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://broker/x}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://broker:0}\n") != 0);
+	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: 'mqtt://broker:+1883'}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: http://broker}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {}\n") != 0);
 	CHECK(load("hostname: pi5\noutputs:\n  - mqtt: {url: mqtt://b, password: x}\n") != 0);
@@ -781,6 +819,8 @@ const t_case mqtt_cases[] = {
     {"mqtt", "close_after_publish_resends_and_cuts", close_after_publish_resends_and_cuts},
     {"mqtt", "ceiling_grows_back", ceiling_grows_back},
     {"mqtt", "one_row_exit_after_three_closes", one_row_exit_after_three_closes},
+    {"mqtt", "broker_closing_everything_still_progresses", broker_closing_everything_still_progresses},
+    {"mqtt", "out_of_time_before_start_publishes_nothing", out_of_time_before_start_publishes_nothing},
     {"mqtt", "deadline_after_written_is_outcome_unknown", deadline_after_written_is_outcome_unknown},
     {"mqtt", "deadline_before_written_is_kept", deadline_before_written_is_kept},
     {"mqtt", "presence_online_offline_disconnect", presence_online_offline_disconnect},

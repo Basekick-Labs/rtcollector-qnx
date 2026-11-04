@@ -55,7 +55,7 @@
 /* Room for the PUBLISH header in front of the payload: fixed header (5),
  * topic length (2), topic, packet id (2). */
 #define HDR_ROOM       (5 + 2 + RTC_MQTT_TOPIC_MAX + 2)
-#define CEILING_MIN    1024u
+#define CEILING_MIN    64u /* below any row: messages can go down to one row */
 #define GROW_AFTER     32u
 #define ONE_ROW_CLOSES 3u
 
@@ -217,13 +217,18 @@ static int wait_packet(rtc_output *o, uint8_t want, uint16_t id, uint64_t until,
 				RTC_WARN(o->name,
 				         "unexpected packet %u (id %u) from the broker; reconnecting",
 				         pk.type, pk.id);
-				return IO_ERR;
+				if (!found)
+					return IO_ERR;
+				close_conn(m); /* what we waited for did arrive */
+				break;
 			}
 		}
 		if (found)
 			return IO_OK;
 	}
 }
+
+static void log_problem(rtc_output *o, int code, const char *fmt, const char *detail);
 
 static void resolve(rtc_output *o)
 {
@@ -240,7 +245,7 @@ static void resolve(rtc_output *o)
 	}
 	m->naddr = 0;
 	if (e != 0) {
-		RTC_WARN(o->name, "cannot resolve %s: %s; retrying", q->host, gai_strerror(e));
+		log_problem(o, 6000, "cannot resolve the host of %s: %s; retrying", gai_strerror(e));
 		return;
 	}
 	for (struct addrinfo *a = res; a && m->naddr < MAX_ADDRS; a = a->ai_next)
@@ -258,6 +263,10 @@ static int tcp_connect(rtc_output *o, uint64_t until, uint64_t deadline_ns)
 	mqtt_impl *m = o->impl;
 	int last = IO_ERR;
 	for (unsigned i = 0; i < m->naddr; i++) {
+		/* Each address gets its share of what is left, so one that drops
+		 * packets (IPv6 behind a firewall) leaves time for the next. */
+		uint64_t now = rtc_mono_ns();
+		uint64_t share = now < until ? now + (until - now) / (m->naddr - i) : until;
 		int fd = socket(m->addr[i].ss_family, SOCK_STREAM, 0);
 		if (fd < 0)
 			continue;
@@ -273,7 +282,7 @@ static int tcp_connect(rtc_output *o, uint64_t until, uint64_t deadline_ns)
 #endif
 		int r = connect(fd, (struct sockaddr *)&m->addr[i], m->addr_len[i]);
 		if (r != 0 && errno == EINPROGRESS) {
-			r = wait_io(o, fd, POLLOUT, until, deadline_ns);
+			r = wait_io(o, fd, POLLOUT, share, deadline_ns);
 			if (r == IO_OK) {
 				int err = 0;
 				socklen_t l = sizeof(err);
@@ -341,8 +350,10 @@ static int connect_broker(rtc_output *o, uint64_t deadline_ns)
 	rtc_collector *c = o->collector;
 	const rtc_mqtt_cfg *q = &c->cfg.mqtt;
 	uint64_t until = rtc_mono_ns() + (uint64_t)q->timeout_ms * 1000000u;
+	/* Never during the final flush. A lookup that is running when shutdown
+	 * starts is not cut short: getaddrinfo cannot be (README). */
 	if (m->naddr == 0 && atomic_load(&c->abort_after_ns) == 0)
-		resolve(o); /* never during the final flush */
+		resolve(o);
 	if (m->naddr == 0)
 		return IO_ERR;
 	int r = tcp_connect(o, until, deadline_ns);
@@ -388,9 +399,14 @@ static int connect_broker(rtc_output *o, uint64_t deadline_ns)
 	if (m->presence) {
 		r = publish_status(o, "online", until, deadline_ns);
 		if (r != IO_OK) {
-			if (r != IO_LATE)
-				log_problem(o, 3000 + r, "cannot publish presence to %s: %s; retrying",
-				            io_str(r));
+			if (r != IO_LATE && m->last_logged != 3000 + r) {
+				m->last_logged = 3000 + r;
+				RTC_ERROR(o->name,
+				          "%s does not take the presence message on %s (%s): no data is sent "
+				          "until it does. Allow that topic, or set status_topic: '' to run "
+				          "without presence",
+				          q->url, m->status_topic, io_str(r));
+			}
 			close_conn(m);
 			return r;
 		}
@@ -669,7 +685,7 @@ static size_t build_message(rtc_output *o, size_t *nrows)
 		size_t rl = need < hard
 		                ? encode_row(o, &v, o->recs[i].ts_ns, in, nin, pay + len + sep, hard - need)
 		                : 0;
-		if (rl == 0 || (*nrows && len + sep + rl > soft)) {
+		if (rl == 0 || (*nrows && need + rl > soft)) {
 			if (*nrows)
 				break; /* the next message */
 			/* Alone and over max_message_bytes: it can never be sent. */
@@ -701,14 +717,15 @@ static size_t build_message(rtc_output *o, size_t *nrows)
 }
 
 /* A close during or after a PUBLISH of size bytes: the broker may refuse
- * messages that large. */
-static void learn_ceiling(rtc_output *o, size_t size)
+ * messages that large. True when the ceiling went down (at most about 20
+ * times from max_message_bytes to one row). */
+static bool learn_ceiling(rtc_output *o, size_t size)
 {
 	mqtt_impl *m = o->impl;
 	size_t cut = size / 2 < CEILING_MIN ? CEILING_MIN : size / 2;
 	m->acks_since_cut = 0;
 	if (cut >= m->ceiling)
-		return;
+		return false;
 	m->ceiling = cut;
 	if (!m->ceiling_logged) {
 		m->ceiling_logged = true;
@@ -718,6 +735,7 @@ static void learn_ceiling(rtc_output *o, size_t size)
 		         "no other client uses the id %s",
 		         size, cut, m->topic, m->client_id);
 	}
+	return true;
 }
 
 /* --- the output ------------------------------------------------------------ */
@@ -730,6 +748,8 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint64_t deadline_ns)
 	size_t plen = build_message(o, &nrows);
 	if (nrows == 0)
 		return remaining(o) ? RTC_SEND_AGAIN : RTC_SEND_DONE;
+	if (out_of_time(o, deadline_ns, rtc_mono_ns()))
+		return RTC_SEND_RETRY; /* not started: kept, the caller accounts for the rest */
 
 	if (!m->connected) {
 		int r = connect_broker(o, deadline_ns);
@@ -742,6 +762,12 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint64_t deadline_ns)
 	bool fresh = m->fresh;
 	uint16_t id = rtc_mqtt_next_id(&m->last_id);
 	size_t at = rtc_mqtt_publish_header(m->msg, HDR_ROOM, m->topic, strlen(m->topic), id, false, plen);
+	if (at == HDR_ROOM) { /* cannot happen: topic and size are bounded at load */
+		for (size_t i = 0; i < o->nrecs; i++)
+			if (m->in_msg[i])
+				reject(o, i);
+		return remaining(o) ? RTC_SEND_AGAIN : RTC_SEND_DONE;
+	}
 	size_t size = HDR_ROOM - at + plen;
 	uint64_t until = rtc_mono_ns() + (uint64_t)q->timeout_ms * 1000000u;
 	size_t written = 0;
@@ -794,7 +820,7 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint64_t deadline_ns)
 	rtc_counter_add(&o->counters.request_errors, 1);
 	log_problem(o, 4000 + r, "publish to %s failed: %s; retrying", io_str(r));
 	if (r == IO_CLOSED && written > 0) {
-		learn_ceiling(o, size);
+		bool cut = learn_ceiling(o, size);
 		size_t one = SIZE_MAX;
 		for (size_t i = 0; i < o->nrecs && nrows == 1; i++)
 			if (m->in_msg[i])
@@ -817,6 +843,8 @@ static enum rtc_send_outcome send_batch(rtc_output *o, uint64_t deadline_ns)
 			}
 		} else
 			m->one_row_closes = 0;
+		if (cut)
+			return RTC_SEND_AGAIN; /* smaller messages now, without a backoff */
 	}
 	return RTC_SEND_RETRY;
 }
@@ -868,6 +896,8 @@ static void idle(rtc_output *o, uint64_t now)
 			m->ping_sent_ns = now;
 			m->last_tx_ns = now;
 		} else if (w >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+			log_problem(o, 5002, "cannot send PINGREQ to %s: %s; reconnecting when there is data",
+			            w >= 0 ? "partial write" : strerror(errno));
 			close_conn(m); /* a partial PINGREQ breaks the stream */
 		}
 	}

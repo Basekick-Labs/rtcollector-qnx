@@ -608,7 +608,8 @@ static int parse_mqtt_url(rtc_mqtt_cfg *q)
 		char *end;
 		errno = 0;
 		long port = strtol(rest + 1, &end, 10);
-		if (end == rest + 1 || *end || errno || port < 1 || port > 65535) {
+		if (end == rest + 1 || *end || errno || port < 1 || port > 65535 ||
+		    strspn(rest + 1, "0123456789") != strlen(rest + 1)) {
 			RTC_ERROR(C, "outputs.mqtt.url: the port must be from 1 to 65535");
 			return 1;
 		}

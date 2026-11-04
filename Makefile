@@ -36,13 +36,13 @@ DEPFLAGS = -MMD -MP
 ifeq ($(PLATFORM),qnx)
   DEPFLAGS = -Wp,-MMD,$(@:.o=.d),-MT,$@,-MP
   # SDP 8.0 ships libcurl (shared, on the image) and libzstd (static here: the
-  # mkqnximage image has no libzstd.so). libyaml is vendored. pthreads are in
-  # libc on QNX: no -lpthread.
+  # mkqnximage image has no libzstd.so). libsocket: the MQTT output. libyaml is
+  # vendored. pthreads are in libc on QNX: no -lpthread.
   DEPS_CFLAGS := -I$(QNX_TARGET)/usr/include/zstd -Ithird_party/libyaml/include -DYAML_DECLARE_STATIC -DRTC_QNX=1 \
                  -D_QNX_SOURCE
   YAML_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(wildcard third_party/libyaml/src/*.c))
   PLATFORM_SRC := $(wildcard src/qnx/*.c)
-  QNX_LIBS := -lcurl -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
+  QNX_LIBS := -lcurl -lsocket -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
 endif
 
 CFLAGS  ?= -O2 -g

@@ -64,6 +64,7 @@ stop)
 	# later command would talk to the old (possibly hung) VM.
 	pids=$( (cat output/qemu.pid 2>/dev/null; ss -ltnpH "sport = :${SERIAL_PORT}" 2>/dev/null |
 		sed -n 's/.*pid=\([0-9]*\).*/\1/p') | sort -u)
+	pids=$(for p in $pids; do case $(cat "/proc/$p/comm" 2>/dev/null) in qemu-system*) echo "$p" ;; esac; done)
 	for p in $pids; do kill "$p" 2>/dev/null || true; done
 	for p in $pids; do
 		for _ in $(seq 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.2; done

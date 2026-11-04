@@ -78,7 +78,7 @@ ev=$(field "$(echo "$out" | grep ^internal_trace)" events); oo=$(field "$(echo "
 
 # Starvation: four prio-30 hogs, one per CPU, above the logger (15): the
 # kernel drops events; they are counted and no garbage latency comes out.
-out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/tdrop.out 2>&1 & P=\$!; sleep 1; for c in 0 1 2 3; do on -C \$c -p 30 ./rtc_hog -b 2500 -s 1 -t 3 & done; sleep 5; kill \$P; sleep 2; grep ^internal_trace /tmp/tdrop.out | tail -1; grep '^sched' /tmp/tdrop.out | sed -n 's/.*latency_max_ns=\([0-9]*\)i.*/\1/p' | sort -n | tail -1")
+out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/tdrop.out 2>&1 & P=\$!; sleep 1; for c in 0 1 2 3; do on -C \$c -p 30 ./rtc_hog -b 300 -s 1 -t 3 & done; sleep 5; kill \$P; sleep 2; grep ^internal_trace /tmp/tdrop.out | tail -1; grep '^sched' /tmp/tdrop.out | sed -n 's/.*latency_max_ns=\([0-9]*\)i.*/\1/p' | sort -n | tail -1")
 kd=$(field "$(echo "$out" | grep ^internal_trace)" kernel_dropped); mx=$(echo "$out" | tail -1)
 [ "${kd:-0}" -gt 0 ] && ok "starved logger: kernel drops counted ($kd)" || bad "kernel_dropped=${kd:-?} (expected drops)"
 [ "${mx:-0}" -lt 500000000 ] && ok "after drops: no garbage latency (max ${mx} ns)" || bad "garbage latency after drops: $mx"

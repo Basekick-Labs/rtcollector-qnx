@@ -31,6 +31,13 @@ void rtc_config_defaults(rtc_config *c)
 	c->rmgr_group = 0;
 	c->rmgr_priority = 63;
 	c->rmgr_threads = 4;
+	c->trace_interval_s = 0;
+	c->trace_priority = 15;
+	c->trace_min_priority = 40;
+	c->trace_top = 16;
+	c->trace_max_rows = 64;
+	c->trace_max_threads = 1024;
+	c->trace_max_bytes = 4u << 20;
 	c->rmgr_buffer_bytes = 256u << 10;
 	c->max_write_bytes = 4096;
 	c->rmgr_drain_bytes = 64u << 10;
@@ -285,6 +292,27 @@ static void load_doc(ctx *x, rtc_config *c)
 				err(x, "rmgr_threads", "must be an integer from 1 to 16");
 			else
 				c->rmgr_threads = (unsigned)t;
+		} else if (!strcmp(k, "trace_interval")) {
+			get_num(x, v, "trace_interval", &c->trace_interval_s);
+		} else if (!strcmp(k, "trace_max_bytes")) {
+			get_size(x, v, "trace_max_bytes", &c->trace_max_bytes);
+		} else if (!strcmp(k, "trace_priority") || !strcmp(k, "trace_min_priority") ||
+		           !strcmp(k, "trace_top") || !strcmp(k, "trace_max_rows") ||
+		           !strcmp(k, "trace_max_threads")) {
+			double t = -1;
+			get_num(x, v, k, &t);
+			if (t < 0 || t > 1000000 || t != floor(t))
+				err(x, k, "must be a non-negative integer");
+			else if (!strcmp(k, "trace_priority"))
+				c->trace_priority = (int)t;
+			else if (!strcmp(k, "trace_min_priority"))
+				c->trace_min_priority = (int)t;
+			else if (!strcmp(k, "trace_top"))
+				c->trace_top = (unsigned)t;
+			else if (!strcmp(k, "trace_max_rows"))
+				c->trace_max_rows = (unsigned)t;
+			else
+				c->trace_max_threads = (unsigned)t;
 		} else if (!strcmp(k, "rmgr_group")) {
 			double t = -1;
 			get_num(x, v, "rmgr_group", &t);
@@ -489,6 +517,24 @@ int rtc_config_validate(rtc_config *c)
 	}
 	if (c->rmgr_drain_bytes < c->max_write_bytes + 1 || c->rmgr_drain_bytes > (16u << 20)) {
 		RTC_ERROR(C, "rmgr_drain_bytes: must be from max_write_bytes to 16MiB");
+		bad++;
+	}
+	if (c->trace_interval_s == 0)
+		c->trace_interval_s =
+		    c->interval_s < 1 ? 1 : c->interval_s; /* one per collection round, at least 1 s */
+	if (c->trace_interval_s < 1 || c->trace_interval_s > 3600) {
+		RTC_ERROR(C, "trace_interval: must be from 1 to 3600 seconds");
+		bad++;
+	}
+	if (c->trace_priority < 1 || c->trace_priority > 253 || c->trace_min_priority > 255 ||
+	    c->trace_top > 1024 || c->trace_max_rows < 1 || c->trace_max_rows > 4096 ||
+	    c->trace_max_threads < 16 || c->trace_max_threads > 65536) {
+		RTC_ERROR(C, "trace_*: priority 1-253, min_priority 0-255, top up to 1024, max_rows 1-4096, "
+		             "max_threads 16-65536");
+		bad++;
+	}
+	if (c->trace_max_bytes < (64u << 10) || c->trace_max_bytes > (256u << 20)) {
+		RTC_ERROR(C, "trace_max_bytes: must be from 64KiB to 256MiB");
 		bad++;
 	}
 	if (c->rmgr_path[0] != '/') {

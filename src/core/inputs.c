@@ -7,7 +7,7 @@
 static const rtc_input_def *const all_inputs[] = {
     &rtc_input_internal,
 #ifdef RTC_QNX
-    &rtc_input_cpu,      &rtc_input_mem, &rtc_input_processes, &rtc_input_rmgr,
+    &rtc_input_cpu,      &rtc_input_mem, &rtc_input_processes, &rtc_input_rmgr, &rtc_input_trace,
 #endif
 };
 

@@ -42,7 +42,7 @@ ifeq ($(PLATFORM),qnx)
                  -D_QNX_SOURCE
   YAML_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(wildcard third_party/libyaml/src/*.c))
   PLATFORM_SRC := $(wildcard src/qnx/*.c)
-  QNX_LIBS := -lcurl -Wl,-Bstatic -lzstd -Wl,-Bdynamic -lm
+  QNX_LIBS := -lcurl -ltracelog -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
 endif
 
 CFLAGS  ?= -O2 -g

@@ -76,6 +76,7 @@ static struct {
 	pthread_t tracer, rotator, monitor, parser;
 	bool session, monitor_running, parser_running;
 	_Atomic bool stop_rotator, stopping;
+	_Atomic bool session_ending; /* session_stop() is stopping the tracer */
 
 	/* current interval file (writer callback and rotator, under fmu) */
 	pthread_mutex_t fmu;
@@ -235,8 +236,14 @@ static void *tracer_main(void *arg)
 	(void)arg;
 	/* The writer callback runs on this thread, at its priority. */
 	int rc = tracelog_start(st.in, 1);
-	if (rc == EPERM && !atomic_load(&st.stopping)) {
-		RTC_WARN(C, "kernel tracing needs root or PROCMGR_AID_TRACE; the collector runs without it");
+	/* tracelog_start returns when the session ends; a failure that is not
+	 * ours to cause (we stopped it, or the collector is exiting) means the
+	 * trace cannot be had: say so in the counters, not only in the log. */
+	if (rc != 0 && !atomic_load(&st.session_ending) && !atomic_load(&st.stopping)) {
+		if (rc == EPERM)
+			RTC_WARN(C, "kernel tracing needs root or PROCMGR_AID_TRACE; the collector runs without it");
+		else
+			RTC_WARN(C, "kernel tracing failed: %s; the collector runs without it", strerror(rc));
 		rtc_counter_set(&st.k.unavailable, 1);
 		rtc_counter_set(&st.c->counters.trace_unavailable, 1);
 	}
@@ -264,6 +271,7 @@ static void session_start(void)
 	open_next();
 	pthread_mutex_unlock(&st.fmu);
 	atomic_store(&st.stop_rotator, false);
+	atomic_store(&st.session_ending, false);
 	if (rtc_start_thread(st.c, &st.tracer, tracer_main, NULL, st.c->cfg.trace_priority, "trace") != 0) {
 		tracelog_instance_destroy(st.in);
 		st.in = NULL;
@@ -280,6 +288,7 @@ static void session_stop(void)
 	if (!st.session)
 		return;
 	atomic_store(&st.stop_rotator, true);
+	atomic_store(&st.session_ending, true);
 	pthread_join(st.rotator, NULL);
 	tracelog_stop(st.in);
 	pthread_join(st.tracer, NULL);

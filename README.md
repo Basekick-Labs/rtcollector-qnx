@@ -251,6 +251,11 @@ build/rtcollector --config rtcollector.yml          # run until SIGINT/SIGTERM
 build/rtcollector --config rtcollector.yml --once   # one round, one send; exit 0 only if nothing was lost
 ```
 
+SIGINT and SIGTERM stop the collector (with a final flush) even when it was
+started with them ignored, as `cmd &` in a script does: Ctrl-C to that
+script stops the collector too. To keep it running past that, start it in
+its own session (`setsid` on Linux, `on -d` on QNX).
+
 A minimal configuration, in rtcollector's YAML format:
 
 ```yaml

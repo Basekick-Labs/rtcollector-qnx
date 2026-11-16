@@ -95,6 +95,16 @@ int main(int argc, char **argv)
 		 * thread starts so the workers inherit the mask. --once keeps the
 		 * default handlers, so Ctrl-C still interrupts it. */
 		pthread_sigmask(SIG_BLOCK, &set, NULL);
+		/* A shell starts background jobs with SIGINT ignored, and an ignored
+		 * signal is discarded before sigwait can take it. Restore the
+		 * default action; with the signals blocked it never runs. */
+		struct sigaction dfl;
+		memset(&dfl, 0, sizeof dfl);
+		dfl.sa_handler = SIG_DFL;
+		sigemptyset(&dfl.sa_mask);
+		if (sigaction(SIGINT, &dfl, NULL) != 0 || sigaction(SIGTERM, &dfl, NULL) != 0)
+			RTC_WARN("main", "cannot reset SIGINT/SIGTERM (%s); they may be ignored",
+			         strerror(errno));
 		RTC_INFO("main",
 		         "rtcollector %s starting: interval=%gs flush_interval=%gs buffer=%llu bytes host=%s",
 		         RTC_VERSION, cfg.interval_s, cfg.flush_interval_s, (unsigned long long)col.ring.cap,

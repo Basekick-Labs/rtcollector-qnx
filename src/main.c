@@ -94,10 +94,19 @@ int main(int argc, char **argv)
 		/* Signals go to sigwait in this thread; block them before any
 		 * thread starts so the workers inherit the mask. --once keeps the
 		 * default handlers, so Ctrl-C still interrupts it. */
-		pthread_sigmask(SIG_BLOCK, &set, NULL);
-		/* A shell starts background jobs with SIGINT ignored, and an ignored
-		 * signal is discarded before sigwait can take it. Restore the
-		 * default action; with the signals blocked it never runs. */
+		int e = pthread_sigmask(SIG_BLOCK, &set, NULL);
+		if (e != 0) {
+			/* Unblocked, the default action below would kill the process. */
+			RTC_ERROR("main", "cannot block SIGINT/SIGTERM: %s", strerror(e));
+			rtc_collector_destroy(&col);
+			curl_global_cleanup();
+			return 1;
+		}
+		/* A non-interactive shell (no job control) starts background jobs
+		 * with SIGINT ignored, and an ignored signal can be discarded before
+		 * sigwait takes it (macOS, QNX). Restore the default action; with
+		 * the signals blocked it never runs. So SIGINT stops a collector
+		 * started with `cmd &` in a script, Ctrl-C to that script included. */
 		struct sigaction dfl;
 		memset(&dfl, 0, sizeof dfl);
 		dfl.sa_handler = SIG_DFL;
@@ -113,9 +122,13 @@ int main(int argc, char **argv)
 			rc = 1;
 		} else {
 			int sig = 0;
-			sigwait(&set, &sig);
-			RTC_INFO("main", "signal %d: stopping (final flush up to %gs)", sig,
-			         cfg.shutdown_timeout_s);
+			while ((e = sigwait(&set, &sig)) == EINTR)
+				;
+			if (e != 0)
+				RTC_ERROR("main", "sigwait failed: %s; stopping", strerror(e));
+			else
+				RTC_INFO("main", "signal %d: stopping (final flush up to %gs)", sig,
+				         cfg.shutdown_timeout_s);
 			rtc_collector_stop(&col);
 		}
 	}

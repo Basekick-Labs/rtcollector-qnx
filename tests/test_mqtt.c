@@ -166,6 +166,9 @@ static void json_rows(void)
 {
 	fb_script s = {0};
 	CHECK(setup(&s, json_cfg) == 0);
+	/* The fixed timestamp below must pass whatever the build date: the
+	 * clock floor (build time - 1 day) is not what this test checks. */
+	C.clock_floor_ns = 0;
 	rtc_rec_builder b;
 	rtc_rb_init(&b, C.scratch, C.cfg.max_record_bytes, "app");
 	rtc_rb_tag(&b, "host", "a/b"); /* a record's host: in the row, not the topic */

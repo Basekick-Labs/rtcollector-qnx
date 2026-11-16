@@ -666,6 +666,67 @@ static void batch_clear_and_stop(void)
 	batch_teardown();
 }
 
+/* An event exactly at the watermark waits: the slower CPU's next buffer can
+ * start at the same time, with an event that sorts before it. */
+static void batch_strictly_before_watermark(void)
+{
+	batch_setup(64);
+	rtc_sched_batch_cpu_time(&B, 1, 20000);
+	bev(0, 20000, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 30000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.n, 1);
+	bev(1, 20000, 9, 1, RTC_EV_READY); /* CPU1's next buffer */
+	rtc_sched_batch_cpu_time(&B, 1, 40000);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 1 && t->lat.max == 0 && t->state == RTC_EV_RUNNING);
+	batch_teardown();
+}
+
+/* A drop marker from a CPU not seen yet in this batch holds the watermark
+ * (its CPU's own time cannot: it has none). */
+static void batch_gap_unknown_cpu_holds(void)
+{
+	batch_setup(64);
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_gap(&S, &B, 1, 10000, 4);
+	bev(0, 30000, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t == NULL || t->wakeups == 0);
+	CHECK_EQ_U(B.n, 3);
+	/* CPU1 resumes at 25 µs: the loss may hide the RUNNING of the READY at
+	 * 20 µs, so the reset lands after it and 30 µs pairs with nothing. */
+	rtc_sched_batch_cpu_time(&B, 1, 25000);
+	rtc_sched_batch_cpu_time(&B, 1, 50000);
+	rtc_sched_batch_cpu_time(&B, 0, 50000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 0);
+	CHECK_EQ_U(S.drops, 4);
+	batch_teardown();
+}
+
+/* The order itself: time, then gap, READY, the rest, then arrival. */
+static void batch_order_key(void)
+{
+	rtc_sched_qev a = {.t_ns = 10, .seq = 1, .kind = RTC_EV_RUNNING};
+	rtc_sched_qev b = {.t_ns = 10, .seq = 2, .kind = RTC_EV_BLOCKED};
+	CHECK(rtc_sched_qev_cmp(&a, &b) < 0 && rtc_sched_qev_cmp(&b, &a) > 0);
+	rtc_sched_qev r = {.t_ns = 10, .seq = 9, .kind = RTC_EV_READY};
+	CHECK(rtc_sched_qev_cmp(&r, &a) < 0);
+	rtc_sched_qev g = {.t_ns = 10, .seq = 99, .kind = RTC_SCHED_GAP};
+	CHECK(rtc_sched_qev_cmp(&g, &r) < 0);
+	rtc_sched_qev e = {.t_ns = 9, .seq = 100, .kind = RTC_EV_BLOCKED};
+	CHECK(rtc_sched_qev_cmp(&e, &g) < 0);
+	CHECK(rtc_sched_qev_cmp(&a, &a) == 0);
+	rtc_sched_qev big = {.t_ns = UINT64_MAX, .seq = 0, .kind = RTC_EV_READY};
+	CHECK(rtc_sched_qev_cmp(&e, &big) < 0); /* no subtraction overflow */
+}
+
 const t_case sched_cases[] = {
     {"sched", "out_of_order_ignored", out_of_order_ignored},
     {"sched", "histogram", histogram},
@@ -689,5 +750,8 @@ const t_case sched_cases[] = {
     {"sched", "out_of_order_resets_wait", out_of_order_resets_wait},
     {"sched", "batch_silent_cpu", batch_silent_cpu},
     {"sched", "batch_clear_and_stop", batch_clear_and_stop},
+    {"sched", "batch_strictly_before_watermark", batch_strictly_before_watermark},
+    {"sched", "batch_gap_unknown_cpu_holds", batch_gap_unknown_cpu_holds},
+    {"sched", "batch_order_key", batch_order_key},
     {0},
 };

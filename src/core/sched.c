@@ -468,7 +468,7 @@ static int qev_rank(uint8_t kind)
 	return kind == RTC_SCHED_GAP ? 0 : kind == RTC_EV_READY ? 1 : 2;
 }
 
-static int qev_cmp(const void *pa, const void *pb)
+int rtc_sched_qev_cmp(const void *pa, const void *pb)
 {
 	const rtc_sched_qev *a = pa, *b = pb;
 	if (a->t_ns != b->t_ns)
@@ -579,7 +579,7 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 		return;
 	}
 	if (b->n > 1)
-		qsort(b->ev, b->n, sizeof(*b->ev), qev_cmp);
+		qsort(b->ev, b->n, sizeof(*b->ev), rtc_sched_qev_cmp);
 	if (b->gap_open)
 		find_open_gaps(b);
 

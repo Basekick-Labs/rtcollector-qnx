@@ -163,6 +163,9 @@ void rtc_sched_batch_gap(rtc_sched *s, rtc_sched_batch *b, unsigned cpu, uint64_
 void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _Atomic bool *stop);
 /* Forgets everything kept (the next file does not follow): counted. */
 void rtc_sched_batch_clear(rtc_sched *s, rtc_sched_batch *b);
+/* The batch's order: time, then a gap's reset, READY, the rest, then arrival.
+ * Exposed for tests (qsort need not be stable: arrival is part of the key). */
+int rtc_sched_qev_cmp(const void *a, const void *b);
 
 /* One reported thread of an interval. */
 typedef struct {

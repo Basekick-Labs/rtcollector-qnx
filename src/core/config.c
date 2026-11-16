@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,12 +21,12 @@
 void rtc_config_defaults(rtc_config *c)
 {
 	memset(c, 0, sizeof(*c));
-	c->interval_s = 10;
+	c->interval_s = 1;        /* the kernel trace needs it: ~1 MB/s on an idle Pi 4 */
 	c->flush_interval_s = -1; /* = interval */
 	c->shutdown_timeout_s = 5;
 	c->collect_priority = 10;
 	c->send_priority = 9;
-	c->processes_every = 6;
+	c->processes_every = 0; /* = a process scan a minute, in rounds (validate) */
 	c->max_processes = 4096;
 	snprintf(c->rmgr_path, sizeof(c->rmgr_path), "/dev/rtcollector");
 	c->rmgr_mode = 0660;
@@ -369,7 +370,7 @@ static void load_doc(ctx *x, rtc_config *c)
 			else if (!strcmp(k, "send_priority"))
 				c->send_priority = t >= 0 && t <= 1000 ? (int)t : -1;
 			else if (!strcmp(k, "processes_every"))
-				c->processes_every = t >= 0 && t <= 1000000 ? (unsigned)t : 0;
+				c->processes_every = t >= 1 && t <= 1000000 ? (unsigned)t : UINT_MAX;
 			else
 				c->max_processes = t >= 0 && t <= 1e9 ? (uint64_t)t : 0;
 		} else if (!strcmp(k, "rmgr_path"))
@@ -802,6 +803,10 @@ int rtc_config_validate(rtc_config *c)
 	    c->send_priority > 253) {
 		RTC_ERROR(C, "collect_priority, send_priority: must be from 1 to 253");
 		bad++;
+	}
+	if (c->processes_every == 0) { /* once a minute, whatever the interval */
+		double r = floor(60.0 / c->interval_s + 0.5);
+		c->processes_every = r < 1 ? 1 : r > 1000000 ? 1000000 : (unsigned)r;
 	}
 	if (c->processes_every < 1 || c->processes_every > 1000000) {
 		RTC_ERROR(C, "processes_every: must be from 1 to 1000000");

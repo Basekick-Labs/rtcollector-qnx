@@ -7,7 +7,8 @@
  * procfs_denied counter says why, instead of failing ~400 opens a round.
  *
  * A scan costs about 50 µs per process, so it runs every processes_every
- * rounds (default 6) and stops at max_processes (overflow counted).
+ * rounds (default: once a minute) and stops at max_processes (overflow
+ * counted).
  *
  *   processes processes=18i,threads=131i
  */

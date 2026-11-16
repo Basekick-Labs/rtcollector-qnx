@@ -48,7 +48,9 @@ check() {
 	echo "ok   signals: $name"
 }
 
-check "SIGINT" INT 0
+# A background job of this non-interactive script already starts with
+# SIGINT ignored: the case seen on the target.
+check "SIGINT to a background job" INT 0
 check "SIGTERM" TERM 0
 check "SIGINT while ignored at start" INT 1
 check "SIGTERM while ignored at start" TERM 1

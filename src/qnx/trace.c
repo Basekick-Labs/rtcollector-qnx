@@ -117,7 +117,7 @@ typedef struct {
 	rtc_counter intervals, files_dropped, flush_timeouts; /* rotator thread */
 	rtc_counter events, kernel_dropped, parse_ns, parse_errors, threads_overflow, snapshots_lost,
 	    out_of_order, threads_evicted, threads_omitted, vectors_overflow, ready_repeats, events_discarded,
-	    reorder_overflow, cpu_time_backwards, cpu_silent, watermark_lag_ns; /* parser */
+	    reorder_overflow, cpu_time_backwards, cpu_silent, files_held, watermark_lag_ns; /* parser */
 	rtc_counter unavailable; /* set once, by whichever thread finds out */
 } trace_counters;
 
@@ -674,12 +674,8 @@ static void parse_file(const char *path, bool discont, bool truncated, uint64_t 
 	/* In time order, up to what every CPU reached. A complete file's tail
 	 * waits for the next one; an incomplete one's is dropped (counted). */
 	rtc_sched_batch_apply(&st.sched, &st.batch, ok && !truncated, &st.stopping);
-	if (!ok) {
-		/* Part of the file was not read: the next file does not follow
-		 * what was applied, so pending waits are forgotten. */
-		rtc_counter_add(&st.k.parse_errors, 1);
-		rtc_sched_dropped(&st.sched, 0);
-	}
+	if (!ok)
+		rtc_counter_add(&st.k.parse_errors, 1); /* the apply above dropped its tail and reset */
 	clock_gettime(CLOCK_MONOTONIC, &z);
 	rtc_counter_add(&st.k.events, st.sched.events - before);
 	rtc_counter_set(&st.k.parse_ns,
@@ -693,6 +689,7 @@ static void parse_file(const char *path, bool discont, bool truncated, uint64_t 
 	rtc_counter_set(&st.k.reorder_overflow, st.batch.overflow);
 	rtc_counter_set(&st.k.cpu_time_backwards, st.batch.cpu_backwards);
 	rtc_counter_set(&st.k.cpu_silent, st.batch.cpu_silent);
+	rtc_counter_set(&st.k.files_held, st.batch.files_held);
 	rtc_counter_set(&st.k.watermark_lag_ns, st.batch.lag_ns);
 
 	if (atomic_load(&st.stopping))
@@ -761,19 +758,28 @@ static int init(rtc_collector *c)
 	pthread_mutex_init(&st.qmu, NULL);
 	pthread_mutex_init(&st.pmu, NULL);
 	pthread_cond_init(&st.qcv, NULL);
-	/* The sort batch: every kernel trace event takes at least 16 bytes of
-	 * the file and a file holds at most trace_max_bytes, so one file never
-	 * has more events than this (24 bytes each: 1.5 x trace_max_bytes).
-	 * Thread events, the only ones kept, take two 16-byte slots in wide
-	 * mode, which leaves room for what one file carries to the next. */
 	if (rtc_sched_init(&st.sched, c->cfg.trace_max_threads) != 0 ||
 	    rtc_sched_snapshot_init(&st.snap[0], c->cfg.trace_max_rows) != 0 ||
 	    rtc_sched_snapshot_init(&st.snap[1], c->cfg.trace_max_rows) != 0 ||
-	    rtc_sched_snapshot_init(&st.out, c->cfg.trace_max_rows) != 0 ||
-	    rtc_sched_batch_init(&st.batch, c->cfg.trace_max_bytes / 16) != 0) {
+	    rtc_sched_snapshot_init(&st.out, c->cfg.trace_max_rows) != 0) {
 		RTC_ERROR(C, "cannot allocate the trace tables");
 		free_tables(); /* not added as an input: destroy() will not run */
 		return -1;
+	}
+	/* The sort batch: every kernel trace event takes at least 16 bytes of
+	 * the file and a file holds at most trace_max_bytes, so one file never
+	 * has more events than this (24 bytes each: 1.5 x trace_max_bytes).
+	 * Thread events, the only ones kept, are expected to take two 16-byte
+	 * slots in wide mode, which leaves room for what one file carries to the
+	 * next; if not, the batch overflows (counted: reorder_overflow). It is
+	 * the largest allocation of the input (96 MiB at 64 MiB): without it the
+	 * input is unavailable, the collector runs on. */
+	if (rtc_sched_batch_init(&st.batch, c->cfg.trace_max_bytes / 16) != 0) {
+		RTC_WARN(C, "cannot allocate the trace sort buffer (1.5 x trace_max_bytes); "
+		            "the collector runs without kernel tracing");
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&c->counters.trace_unavailable, 1);
+		return 0;
 	}
 	rtc_sched_batch_expect(&st.batch, st.ncpu);
 	return 0;
@@ -810,6 +816,8 @@ static void sweep_stale_files(void)
 static void start(rtc_collector *c)
 {
 	sweep_stale_files();
+	if (!st.batch.ev)
+		return; /* no sort buffer (init): unavailable, counted */
 	if (!load_tracelog()) {
 		RTC_WARN(C, "cannot load %s (%s); the collector runs without kernel tracing", tracelog_lib,
 		         dlerror());
@@ -989,6 +997,7 @@ static int gather(rtc_collector *c)
 	emit_u(&b, "reorder_overflow", rtc_counter_get(&st.k.reorder_overflow));
 	emit_u(&b, "cpu_time_backwards", rtc_counter_get(&st.k.cpu_time_backwards));
 	emit_u(&b, "cpu_silent", rtc_counter_get(&st.k.cpu_silent));
+	emit_u(&b, "files_held", rtc_counter_get(&st.k.files_held));
 	emit_u(&b, "watermark_lag_ns", rtc_counter_get(&st.k.watermark_lag_ns));
 	emit_u(&b, "flush_timeouts", rtc_counter_get(&st.k.flush_timeouts));
 	emit_u(&b, "unavailable", rtc_counter_get(&st.k.unavailable));

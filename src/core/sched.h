@@ -96,7 +96,8 @@ typedef struct {
 	uint64_t threads_overflow, vectors_overflow, events, drops;
 	uint64_t out_of_order;      /* events older than the thread's newest: ignored, the
 	                             * thread's pending wait forgotten */
-	uint64_t ready_repeats;     /* READY while already READY: an event of the thread was lost */
+	uint64_t ready_repeats;     /* READY while already READY: an event of the thread was lost,
+	                             * or a READY and a RUNNING share a timestamp; the wait restarts */
 	uint64_t threads_evicted;   /* idle threads dropped from the table (their DEAD was lost) */
 	uint64_t exited_unreported; /* threads that woke and exited before the interval's rows */
 } rtc_sched;
@@ -115,7 +116,8 @@ void rtc_sched_interrupt(rtc_sched *s, unsigned cpu, uint32_t vector);
 void rtc_sched_dropped(rtc_sched *s, uint64_t n);
 
 /* Events of one trace file, applied in time order (see the top). One
- * allocation at init; nothing allocates afterwards. */
+ * allocation at init; the batch allocates nothing afterwards (qsort is the C
+ * library's, on the parser thread). */
 typedef struct {
 	uint64_t t_ns;
 	uint32_t pid, tid; /* a gap: pid = events the kernel dropped */
@@ -146,10 +148,12 @@ typedef struct {
 	uint64_t first[RTC_SCHED_MAX_CPUS]; /* their first time since the gap */
 	size_t gap_idx[RTC_SCHED_MAX_CPUS];
 	/* counters (the parser thread only) */
-	uint64_t discarded;     /* events past the watermark of an incomplete file */
+	uint64_t discarded;     /* events not applied: past the watermark of an incomplete file,
+	                         * before every CPU resumed after a gap, kept across a gap */
 	uint64_t overflow;      /* the batch filled up before the end of a file */
 	uint64_t cpu_backwards; /* an event older than the one before it on its CPU */
 	uint64_t cpu_silent;    /* a CPU with no event for two applies: released */
+	uint64_t files_held;    /* incomplete files dropped whole: a CPU had no event in them */
 	uint64_t lag_ns;        /* last apply: newest time - watermark */
 } rtc_sched_batch;
 

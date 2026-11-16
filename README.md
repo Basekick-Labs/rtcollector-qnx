@@ -177,11 +177,13 @@ How it works and what it costs:
   and applies them only up to the newest time every CPU has reached; the
   rest waits for the next file. A CPU with no event in the file yet holds
   everything back (its share of the time may be missing; one silent for two
-  files in a row is let go: `cpu_silent`). In an incomplete file (bytes
-  over `trace_max_bytes`, or one the parser could not read to the end) what
-  is held back is dropped instead (`events_discarded`) and pending waits
-  are forgotten; a truncated file may hold no buffer at all of a quiet CPU,
-  and then none of its scheduling events are used.
+  following files is let go: `cpu_silent`). After a gap (the first file, or
+  one after an incomplete file) each CPU resumes at its own time, and the
+  events before the latest of those times are dropped (`events_discarded`).
+  In an incomplete file (bytes over `trace_max_bytes`, or one the parser
+  could not read to the end) what is held back is dropped instead
+  (`events_discarded`) and pending waits are forgotten; a truncated file may hold no buffer at all of a quiet CPU,
+  and then none of its scheduling events are used (`files_held`).
   An event still older than one already applied for its thread is ignored,
   its thread's pending wait forgotten, and counted (`out_of_order`; 0 in
   practice). A kernel drop forgets pending waits at the time of its CPU's
@@ -189,7 +191,7 @@ How it works and what it costs:
 - How much trace a system makes varies: an idle Raspberry Pi 4 produces
   about 1 MB of events per second. With the defaults (`trace_interval` =
   `interval` = 10 s, `trace_max_bytes` 4 MiB) most of every interval is
-  over the cap there, and most intervals give few or no `sched` rows. Use
+  over the cap there, and intervals give fewer `sched` rows, or none. Use
   `trace_interval: 1` with `interval: 1` (a `trace_interval` shorter than
   `interval` loses intervals: `snapshots_lost`), or raise
   `trace_max_bytes`. `bytes_dropped` and `events_discarded` say which.
@@ -219,17 +221,25 @@ How it works and what it costs:
 
 `internal_trace` fields, all totals since start except `parse_ns`:
 `sessions`, `yielded`, `intervals`, `bytes`, `bytes_dropped`,
-`files_dropped`, `events`, `kernel_dropped`, `parse_ns` (the last interval's
+`files_dropped`, `events` (scheduling events applied; those held for the
+next file count when applied, discarded ones never), `kernel_dropped`,
+`parse_ns` (the last interval's
 parse), `parse_errors` (files not read to the end, or without a clock rate),
 `threads_overflow`, `out_of_order`, `threads_omitted`, `threads_evicted`,
 `vectors_overflow` (interrupt vectors past 64, not reported), `snapshots_lost`
-(an interval parsed but not collected), `unavailable`, `events_discarded`
-(past the newest common time of an incomplete file), `reorder_overflow`
+(an interval parsed but not collected), `unavailable` (also when the sort
+buffer cannot be allocated), `events_discarded` (scheduling events not
+applied: held back in an incomplete file, before every CPU resumed after a
+gap, or kept from a file the next one does not follow), `files_held`
+(incomplete files dropped whole because a CPU had no event in them),
+`reorder_overflow`
 (a file with more events than the sort buffer: expected 0),
 `cpu_time_backwards` (a CPU's events not in time order in the file: expected
-0, the sort relies on it), `cpu_silent` (a CPU with no event for two files
-in a row stopped holding the others back), `ready_repeats` (a thread made
-ready while already ready: rare, at equal timestamps), `watermark_lag_ns`
+0, the sort relies on it), `cpu_silent` (a CPU with no event for two
+following files stopped holding the others back), `ready_repeats` (a thread
+made ready while already ready, because one of its events was lost or a
+READY and a RUNNING share a timestamp: the wait restarts at the repeat; a
+few per minute on a Pi 4), `watermark_lag_ns`
 (the last file: newest event minus the newest common time, held for the next
 file), `flush_timeouts` (an interval switch that did not see every CPU's
 buffer within 50 ms: the next file holds the rest).

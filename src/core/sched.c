@@ -140,10 +140,11 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 		if (t) {
 			if (t->wakeups > 0 && t->pid != 1)
 				s->exited_unreported++;
-			if (t->name_t > e->t_ns) {
-				/* Named after this exit: the slot is already the next
-				 * thread with this pid/tid (tids are reused at once).
-				 * End the old one's interval, keep the slot and name. */
+			if (t->name_t > e->t_ns || t->last_t > e->t_ns) {
+				/* Named, or seen running, after this exit: the slot is
+				 * already the next thread with this pid/tid (tids are
+				 * reused at once). End the old one's interval, keep the
+				 * slot and name. */
 				t->wakeups = t->preemptions = t->run_ns = 0;
 				t->max_prio = -1;
 				memset(&t->lat, 0, sizeof(t->lat));
@@ -181,10 +182,13 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 				t->run_ns += e->t_ns - t->run_since;
 			t->run_since = 0;
 		}
-		if (t->state != RTC_EV_READY)
-			t->ready_at = e->t_ns; /* the first READY counts, repeats do not move it */
-		else
-			s->ready_repeats++; /* in time order the kernel never repeats it */
+		/* In time order a READY follows a RUNNING or a block, except when
+		 * an event of the thread was lost, or a READY and a RUNNING share a
+		 * timestamp. The wait restarts: the older start cannot be trusted
+		 * (a lost RUNNING would make it a wait of a whole period). */
+		if (t->state == RTC_EV_READY)
+			s->ready_repeats++;
+		t->ready_at = e->t_ns;
 		break;
 	case RTC_EV_RUNNING:
 		if (e->cpu < RTC_SCHED_MAX_CPUS)
@@ -431,6 +435,8 @@ void rtc_sched_batch_free(rtc_sched_batch *b)
 	b->cap = b->n = 0;
 }
 
+/* CPUs from RTC_SCHED_MAX_CPUS on are not tracked: they never hold the
+ * watermark, and only the out-of-order rule protects their events. */
 static uint8_t cpu_of(unsigned cpu)
 {
 	return cpu < RTC_SCHED_MAX_CPUS ? (uint8_t)cpu : RTC_SCHED_NO_CPU;
@@ -569,6 +575,22 @@ static void find_open_gaps(rtc_sched_batch *b)
 	}
 }
 
+/* A CPU silent for two applies in a row stops holding the others back
+ * until its next event (the caller forgets pending waits). A gap waiting
+ * for its next event lands now: it would hold the watermark for ever. */
+static void release(rtc_sched_batch *b, unsigned c)
+{
+	uint64_t bit = 1ull << c;
+	if (b->expect & bit)
+		b->quiet |= bit;
+	b->absent[c] = 0;
+	b->cpu_silent++;
+	if (b->gap_open & bit) {
+		b->ev[b->gap_idx[c]].tid = 0;
+		b->gap_open &= ~bit;
+	}
+}
+
 static void apply_one(rtc_sched *s, const rtc_sched_qev *q)
 {
 	if (q->kind == RTC_SCHED_GAP) {
@@ -609,9 +631,7 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 			if (!(b->expect & bit) || (b->quiet & bit))
 				continue;
 			if (++b->absent[c] >= 2) {
-				b->quiet |= bit; /* silent: released until its next event */
-				b->absent[c] = 0;
-				b->cpu_silent++;
+				release(b, c);
 				reset = true;
 			} else {
 				held = true;
@@ -622,8 +642,7 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 			b->absent[c] = 0;
 		} else if (++b->absent[c] >= 2) {
 			b->known &= ~bit;
-			b->absent[c] = 0;
-			b->cpu_silent++;
+			release(b, c);
 			reset = true;
 			continue;
 		}
@@ -640,26 +659,36 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 	if (reset)
 		rtc_sched_dropped(s, 0);
 	if (held) {
-		/* Its events could lie anywhere in this file's time. */
+		/* Its events could lie anywhere in this file's time. In an
+		 * incomplete file it is not released: its buffers may be the ones
+		 * the cap dropped, so the file goes (counted). */
 		uint64_t first = b->n ? b->ev[0].t_ns : newest;
 		w = first;
+		if (!carry)
+			b->files_held++;
 	}
 	b->lag_ns = (w == UINT64_MAX || newest < w) ? 0 : newest - w;
 
 	size_t i = 0;
 	if (b->head) {
 		/* After a gap: the CPUs' events resume at different times, so
-		 * before the latest of those times some CPUs' share is missing
-		 * (a READY whose RUNNING was lost would pair with a later one). */
+		 * before the latest of those times (h) some CPUs' share is missing
+		 * (a READY whose RUNNING was lost would pair with a later one).
+		 * Until every CPU has reached h, nothing is applied or trimmed (a
+		 * CPU behind h may still bring events, or a gap, from before it);
+		 * then what is before h goes (counted) and the head ends. */
 		uint64_t h = 0;
 		for (unsigned c = 0; c < RTC_SCHED_MAX_CPUS; c++)
 			if ((b->started & (1ull << c)) && b->first[c] > h)
 				h = b->first[c];
-		while (i < b->n && b->ev[i].t_ns < h)
-			i++;
-		b->discarded += i;
-		if (!held && b->started)
-			b->head = false; /* every CPU has resumed: h is final */
+		if (held || !b->started || w < h) {
+			w = 0; /* hold everything */
+		} else {
+			while (i < b->n && b->ev[i].t_ns < h)
+				i++;
+			b->discarded += i;
+			b->head = false;
+		}
 	}
 	for (; i < b->n && b->ev[i].t_ns < w; i++) {
 		if (stop && (i & 4095) == 4095 && *stop) {
@@ -680,9 +709,10 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 		b->seq = (uint32_t)k;
 		b->present = 0;
 	} else {
+		/* What follows starts after a gap: forget pending waits even when
+		 * nothing was left over (an overflow ends mid-file). */
 		b->discarded += k;
-		if (k)
-			rtc_sched_dropped(s, 0);
+		rtc_sched_dropped(s, 0);
 		b->n = 0;
 		b->seq = 0;
 		forget_tracking(b);

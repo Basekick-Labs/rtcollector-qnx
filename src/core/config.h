@@ -13,7 +13,7 @@
  *   shutdown_timeout: 5     seconds for the final flush
  *   collect_priority: 10    QNX: collection thread priority (SCHED_RR, 1-253)
  *   send_priority: 9        QNX: sender thread priority
- *   processes_every: 60     rounds between process scans
+ *   processes_every: =60 s  rounds between process scans (default: once a minute)
  *   max_processes: 4096     a scan stops here (overflow counted)
  *   rmgr_path: /dev/rtcollector   rmgr input: where programs write line protocol
  *   rmgr_mode: 0660         its permissions (octal); rmgr_group: 0 its group

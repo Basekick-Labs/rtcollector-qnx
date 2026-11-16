@@ -16,6 +16,7 @@ printf 'interval: 2\nflush_interval: 2\ninputs: [trace, rmgr]\noutputs:\n  - std
 printf 'interval: 1\nflush_interval: 1\ntrace_interval: 3\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-slow.yml"
 printf 'interval: 2\nflush_interval: 2\ntrace_max_threads: 16\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-threads.yml"
 printf 'interval: 2\nflush_interval: 2\ntrace_max_bytes: 64KiB\ninputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-small.yml"
+printf 'inputs: [trace]\noutputs:\n  - stdout: {}\n' >"$B/trace-default.yml"
 (cd "$B" && exec python3 -m http.server "$PORT" --bind 127.0.0.1) >/tmp/rtc-validate-http.log 2>&1 &
 HTTP=$!
 trap 'kill $HTTP 2>/dev/null || true' EXIT
@@ -23,7 +24,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do curl -fsS -o /dev/null "http://127.0.0.1:$PORT
 # A copy that looks for a libtracelog that is not there: an image without it.
 python3 -I -c 'import sys; d=open(sys.argv[1],"rb").read(); assert d.count(b"libtracelog.so.1\0")==1; open(sys.argv[2],"wb").write(d.replace(b"libtracelog.so.1\0", b"libtracelog.so.9\0"))' "$B/rtcollector" "$B/rtcollector-nolib" || { echo "cannot patch the library name"; exit 2; }
 want=$(cksum <"$B/rtcollector" | awk '{print $1}')
-got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-threads.yml trace-slow.yml trace-rmgr.yml trace-big.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
+got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-threads.yml trace-slow.yml trace-rmgr.yml trace-big.yml trace-default.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && ok "deployed (cksum $want)" || { bad "deploy: cksum $got vs $want"; exit 1; }
 
 # Known workload on CPU 1: prio-30 hog 5 ms busy / 5 ms idle, prio-40 thread
@@ -64,6 +65,13 @@ if [ -z "$mx" ]; then
 else
 	[ "$mx" -lt 50000000 ] && ok "bytes dropped at the cap are not a latency (max ${mx} ns, events_discarded=${ed:-?})" || bad "latency across the cap: $mx"
 fi
+
+# The defaults (interval and trace_interval 1 s): one set of rows a second,
+# none lost, nothing over the byte cap on an idle guest.
+out=$(SER "cd /tmp; ./rtcollector --config trace-default.yml > /tmp/tdf.out 2>&1 & sleep 7; slay -f rtcollector; sleep 1; grep -c '^cpu_sched,.*cpu=cpu0' /tmp/tdf.out; grep ^internal_trace /tmp/tdf.out | tail -1")
+n=$(echo "$out" | grep -E '^ *[0-9]+$' | tail -1 | tr -d ' '); it=$(echo "$out" | grep ^internal_trace)
+sl=$(field "$it" snapshots_lost); bd=$(field "$it" bytes_dropped)
+[ -n "$n" ] && [ "$n" -ge 4 ] && [ "${sl:-1}" = "0" ] && [ "${bd:-1}" = "0" ] && ok "defaults: $n trace intervals in 7 s, none lost, nothing over the cap" || { bad "defaults: rows=$n snapshots_lost=${sl:-?} bytes_dropped=${bd:-?}"; echo "$out"; }
 
 # Thread table bound: 16 threads, more are counted.
 out=$(SER "cd /tmp; ./rtcollector --config trace-threads.yml > /tmp/tt.out 2>&1 & sleep 1; for i in 1 2 3 4 5 6 7 8; do ./rtc_hog -b 1 -s 1 -t 3 & done; sleep 4; slay -f rtcollector; sleep 1; grep ^internal_trace /tmp/tt.out | tail -1")

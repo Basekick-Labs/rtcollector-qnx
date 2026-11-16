@@ -58,6 +58,8 @@ struct rtc_output {
 	bool draining; /* a flush is in progress: keep sending until the ring is empty */
 	uint64_t next_attempt_ns;
 	uint64_t backoff_ns;
+	uint64_t drop_warn_ns;    /* last "buffer full" warning (sender thread) */
+	uint64_t drop_unwarned;   /* records dropped since it */
 	_Atomic bool sender_done; /* set by its sender thread as its last act */
 
 	rtc_ring_accept accept; /* optional: limit what goes in one batch */

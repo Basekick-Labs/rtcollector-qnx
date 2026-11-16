@@ -266,11 +266,18 @@ static bool output_pass(rtc_collector *c, rtc_output *o, bool final, uint64_t de
 			                         o->max_recs, o->accept, o, &dropped);
 			if (dropped) {
 				rtc_counter_add(&o->counters.records_dropped, dropped);
-				if (c->cfg.warn_on_buffer)
+				/* At most a line a minute (a pass can come every second);
+				 * the counter has every drop. */
+				o->drop_unwarned += dropped;
+				if (c->cfg.warn_on_buffer &&
+				    (o->drop_warn_ns == 0 || now - o->drop_warn_ns >= 60000000000ull)) {
 					RTC_WARN(o->name,
 					         "buffer full: %llu records were dropped before they could "
 					         "be sent",
-					         (unsigned long long)dropped);
+					         (unsigned long long)o->drop_unwarned);
+					o->drop_warn_ns = now;
+					o->drop_unwarned = 0;
+				}
 			}
 			if (o->nrecs == 0)
 				continue; /* evicted while we looked: check again */

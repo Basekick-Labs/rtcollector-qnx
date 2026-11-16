@@ -184,6 +184,14 @@ static void qnx_keys(void)
 	/* Defaults: a round a second (the trace input needs it), a send a
 	 * round, a trace interval a round, a process scan a minute. */
 	CHECK(c.interval_s == 1 && c.flush_interval_s == 1 && c.trace_interval_s == 1);
+	/* processes_every follows interval (a scan a minute) unless set. */
+	CHECK(load(&c, "interval: 10\noutputs: [stdout]\n") == 0 && c.processes_every == 6);
+	CHECK(load(&c, "interval: 0.25\noutputs: [stdout]\n") == 0 && c.processes_every == 240);
+	CHECK(load(&c, "interval: 3600\noutputs: [stdout]\n") == 0 && c.processes_every == 1);
+	CHECK(load(&c, "interval: 10\nprocesses_every: 2\noutputs: [stdout]\n") == 0 &&
+	      c.processes_every == 2);
+	CHECK(load(&c, "processes_every: 0\noutputs: [stdout]\n") == -1);
+	CHECK(load(&c, "processes_every: 1000001\noutputs: [stdout]\n") == -1);
 }
 
 /* The trace keys' defaults never refuse a configuration that does not use the

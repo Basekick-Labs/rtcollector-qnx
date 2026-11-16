@@ -775,6 +775,7 @@ static int init(rtc_collector *c)
 		free_tables(); /* not added as an input: destroy() will not run */
 		return -1;
 	}
+	rtc_sched_batch_expect(&st.batch, st.ncpu);
 	return 0;
 }
 

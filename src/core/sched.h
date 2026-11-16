@@ -137,6 +137,8 @@ typedef struct {
 	uint64_t present;                    /* CPUs with an event since the last apply */
 	unsigned absent[RTC_SCHED_MAX_CPUS]; /* applies in a row without an event */
 	uint64_t gap_open;                   /* CPUs with a gap waiting for their next event */
+	uint64_t expect; /* CPUs the system has: one with no event yet holds everything back */
+	uint64_t quiet;  /* expected CPUs released for silence, until their next event */
 	size_t gap_idx[RTC_SCHED_MAX_CPUS];
 	/* counters (the parser thread only) */
 	uint64_t discarded;     /* events past the watermark of an incomplete file */
@@ -148,6 +150,11 @@ typedef struct {
 
 int rtc_sched_batch_init(rtc_sched_batch *b, size_t cap);
 void rtc_sched_batch_free(rtc_sched_batch *b);
+/* The system has ncpu CPUs: until each has had an event (or stayed silent
+ * for two applies in a row), nothing is applied, since that CPU's share of
+ * the time may be missing (a truncated file can hold no buffer of a quiet
+ * CPU at all). Without it, only CPUs seen hold the watermark. */
+void rtc_sched_batch_expect(rtc_sched_batch *b, unsigned ncpu);
 /* A thread event (READY, RUNNING, BLOCKED, DEAD). */
 void rtc_sched_batch_add(rtc_sched *s, rtc_sched_batch *b, const rtc_sched_event *e);
 /* Any other event of a CPU (an interrupt, a name): the CPU has reached t. */

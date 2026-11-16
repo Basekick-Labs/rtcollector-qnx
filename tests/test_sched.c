@@ -727,6 +727,61 @@ static void batch_order_key(void)
 	CHECK(rtc_sched_qev_cmp(&e, &big) < 0); /* no subtraction overflow */
 }
 
+/* A truncated file can hold no buffer of a quiet CPU at all. With the
+ * system's CPUs known, one without an event holds everything back: an
+ * incomplete file is then dropped (counted), not applied without that
+ * CPU's share; a following file carries until it shows up, and a CPU
+ * silent for two files in a row is released. */
+static void batch_expected_cpu(void)
+{
+	batch_setup(64);
+	rtc_sched_batch_expect(&B, 2);
+	/* Only CPU0 in a truncated file: the thread ran on CPU1 in between. */
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	bev(0, 30000, 9, 1, RTC_EV_READY);
+	bev(0, 30100, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, false, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t == NULL || t->wakeups == 0);
+	CHECK_EQ_U(B.discarded, 3);
+	/* Contiguous files: held while CPU1 is missing, applied when it comes. */
+	rtc_sched_batch_clear(&S, &B);
+	bev(0, 50000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 0, 60000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.n, 1);
+	bev(1, 50100, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 1, 70000);
+	rtc_sched_batch_cpu_time(&B, 0, 70000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 1 && t->lat.max == 100);
+	batch_teardown();
+
+	/* A CPU that never has an event (offline) is released after two files. */
+	batch_setup(64);
+	rtc_sched_batch_expect(&B, 2);
+	bev(0, 1000, 9, 2, RTC_EV_READY);
+	bev(0, 1100, 9, 2, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 5000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.n, 2); /* held (a cpu_time is not an entry) */
+	rtc_sched_batch_cpu_time(&B, 0, 9000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.cpu_silent, 1);
+	rtc_sched_thread *t2 = thread_of(9, 2);
+	CHECK(t2 && t2->wakeups == 1 && t2->lat.max == 100); /* the held events, applied */
+	/* Released: later files apply without it. */
+	bev(0, 10000, 9, 2, RTC_EV_READY);
+	bev(0, 10050, 9, 2, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 20000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	t2 = thread_of(9, 2);
+	CHECK(t2 && t2->wakeups == 2 && t2->lat.n == 2);
+	batch_teardown();
+}
+
 const t_case sched_cases[] = {
     {"sched", "out_of_order_ignored", out_of_order_ignored},
     {"sched", "histogram", histogram},
@@ -753,5 +808,6 @@ const t_case sched_cases[] = {
     {"sched", "batch_strictly_before_watermark", batch_strictly_before_watermark},
     {"sched", "batch_gap_unknown_cpu_holds", batch_gap_unknown_cpu_holds},
     {"sched", "batch_order_key", batch_order_key},
+    {"sched", "batch_expected_cpu", batch_expected_cpu},
     {0},
 };

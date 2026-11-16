@@ -452,6 +452,7 @@ static void cpu_reached(rtc_sched_batch *b, unsigned cpu, uint64_t t)
 	}
 	b->known |= bit;
 	b->present |= bit;
+	b->quiet &= ~bit;
 	if (b->gap_open & bit) {
 		rtc_sched_qev *g = &b->ev[b->gap_idx[cpu]];
 		if (t > g->t_ns)
@@ -498,6 +499,11 @@ static rtc_sched_qev *batch_slot(rtc_sched *s, rtc_sched_batch *b)
 	rtc_sched_qev *q = &b->ev[b->n++];
 	q->seq = b->seq++;
 	return q;
+}
+
+void rtc_sched_batch_expect(rtc_sched_batch *b, unsigned ncpu)
+{
+	b->expect = ncpu >= RTC_SCHED_MAX_CPUS ? ~0ull : (1ull << ncpu) - 1;
 }
 
 void rtc_sched_batch_add(rtc_sched *s, rtc_sched_batch *b, const rtc_sched_event *e)
@@ -589,10 +595,22 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 	 * pending waits are forgotten since its events may still be missing. */
 	bool reset = false;
 	uint64_t w = UINT64_MAX, newest = 0;
+	bool held = false; /* an expected CPU has no event yet */
 	for (unsigned c = 0; c < RTC_SCHED_MAX_CPUS; c++) {
 		uint64_t bit = 1ull << c;
-		if (!(b->known & bit))
+		if (!(b->known & bit)) {
+			if (!(b->expect & bit) || (b->quiet & bit))
+				continue;
+			if (++b->absent[c] >= 2) {
+				b->quiet |= bit; /* silent: released until its next event */
+				b->absent[c] = 0;
+				b->cpu_silent++;
+				reset = true;
+			} else {
+				held = true;
+			}
 			continue;
+		}
 		if (b->present & bit) {
 			b->absent[c] = 0;
 		} else if (++b->absent[c] >= 2) {
@@ -614,6 +632,11 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 			w = b->ev[b->gap_idx[c]].t_ns;
 	if (reset)
 		rtc_sched_dropped(s, 0);
+	if (held) {
+		/* Its events could lie anywhere in this file's time. */
+		uint64_t first = b->n ? b->ev[0].t_ns : newest;
+		w = first;
+	}
 	b->lag_ns = (w == UINT64_MAX || newest < w) ? 0 : newest - w;
 
 	size_t i = 0;

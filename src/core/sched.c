@@ -140,6 +140,19 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 		if (t) {
 			if (t->wakeups > 0 && t->pid != 1)
 				s->exited_unreported++;
+			if (t->name_t > e->t_ns) {
+				/* Named after this exit: the slot is already the next
+				 * thread with this pid/tid (tids are reused at once).
+				 * End the old one's interval, keep the slot and name. */
+				t->wakeups = t->preemptions = t->run_ns = 0;
+				t->max_prio = -1;
+				memset(&t->lat, 0, sizeof(t->lat));
+				t->ready_at = t->run_since = 0;
+				t->state = RTC_EV_BLOCKED;
+				if (e->t_ns > t->last_t)
+					t->last_t = e->t_ns;
+				return;
+			}
 			slot_free(s, (size_t)(t - s->threads));
 		}
 		return;
@@ -147,12 +160,13 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 	rtc_sched_thread *t = find(s, e->pid, e->tid, true);
 	if (!t)
 		return;
-	/* Per-CPU kernel buffers are flushed independently, so at a file
-	 * rotation an older event can arrive after a newer one of the same
-	 * thread. Applying it would leave a stale READY behind (a bogus latency
-	 * of seconds later on): ignore it, and count it. */
+	/* An event older than the thread's newest (it missed the watermark of
+	 * its file): ignore it, and forget the pending wait it may have ended,
+	 * or the next RUNNING reads as a wait that did not happen. */
 	if (e->t_ns < t->last_t) {
 		s->out_of_order++;
+		t->ready_at = t->run_since = 0;
+		t->state = RTC_EV_BLOCKED;
 		return;
 	}
 	t->last_t = e->t_ns;
@@ -169,6 +183,8 @@ void rtc_sched_event_in(rtc_sched *s, const rtc_sched_event *e)
 		}
 		if (t->state != RTC_EV_READY)
 			t->ready_at = e->t_ns; /* the first READY counts, repeats do not move it */
+		else
+			s->ready_repeats++; /* in time order the kernel never repeats it */
 		break;
 	case RTC_EV_RUNNING:
 		if (e->cpu < RTC_SCHED_MAX_CPUS)
@@ -214,11 +230,13 @@ static void copy_name(char *dst, const char *src)
 	dst[n] = '\0';
 }
 
-void rtc_sched_thread_name(rtc_sched *s, uint32_t pid, uint32_t tid, const char *name)
+void rtc_sched_thread_name(rtc_sched *s, uint32_t pid, uint32_t tid, const char *name, uint64_t t_ns)
 {
 	rtc_sched_thread *t = find(s, pid, tid, true);
-	if (t)
+	if (t) {
 		copy_name(t->name, name);
+		t->name_t = t_ns;
+	}
 }
 
 void rtc_sched_process_name(rtc_sched *s, uint32_t pid, const char *name)
@@ -389,4 +407,251 @@ void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_s
 	memset(s->cpu_switches, 0, sizeof(s->cpu_switches));
 	memset(s->cpu_interrupts, 0, sizeof(s->cpu_interrupts));
 	memset(s->vec_count, 0, sizeof(s->vec_count));
+}
+
+/* --- events of a file, in time order ---------------------------------------- */
+
+int rtc_sched_batch_init(rtc_sched_batch *b, size_t cap)
+{
+	memset(b, 0, sizeof(*b));
+	if (cap == 0)
+		cap = 1;
+	b->ev = calloc(cap, sizeof(*b->ev));
+	if (!b->ev)
+		return -1;
+	b->cap = cap;
+	return 0;
+}
+
+void rtc_sched_batch_free(rtc_sched_batch *b)
+{
+	free(b->ev);
+	b->ev = NULL;
+	b->cap = b->n = 0;
+}
+
+static uint8_t cpu_of(unsigned cpu)
+{
+	return cpu < RTC_SCHED_MAX_CPUS ? (uint8_t)cpu : RTC_SCHED_NO_CPU;
+}
+
+/* A CPU reached t: its watermark moves, and a gap waiting for its next
+ * event takes this time (and closes). */
+static void cpu_reached(rtc_sched_batch *b, unsigned cpu, uint64_t t)
+{
+	if (cpu >= RTC_SCHED_MAX_CPUS)
+		return;
+	uint64_t bit = 1ull << cpu;
+	if (b->known & bit) {
+		if (t < b->last[cpu])
+			b->cpu_backwards++; /* the premise of the watermark failed: counted */
+		else
+			b->last[cpu] = t;
+	} else {
+		b->last[cpu] = t;
+	}
+	b->known |= bit;
+	b->present |= bit;
+	if (b->gap_open & bit) {
+		rtc_sched_qev *g = &b->ev[b->gap_idx[cpu]];
+		if (t > g->t_ns)
+			g->t_ns = t;
+		g->tid = 0; /* closed */
+		b->gap_open &= ~bit;
+	}
+}
+
+static int qev_rank(uint8_t kind)
+{
+	/* At equal times: a gap's reset first, then READY (a READY and the
+	 * RUNNING it caused can share a timestamp on two CPUs), then the rest. */
+	return kind == RTC_SCHED_GAP ? 0 : kind == RTC_EV_READY ? 1 : 2;
+}
+
+static int qev_cmp(const void *pa, const void *pb)
+{
+	const rtc_sched_qev *a = pa, *b = pb;
+	if (a->t_ns != b->t_ns)
+		return a->t_ns < b->t_ns ? -1 : 1;
+	int ra = qev_rank(a->kind), rb = qev_rank(b->kind);
+	if (ra != rb)
+		return ra < rb ? -1 : 1;
+	if (a->seq != b->seq)
+		return a->seq < b->seq ? -1 : 1;
+	return 0;
+}
+
+static void forget_tracking(rtc_sched_batch *b)
+{
+	b->known = b->present = b->gap_open = 0;
+	memset(b->absent, 0, sizeof(b->absent));
+}
+
+static rtc_sched_qev *batch_slot(rtc_sched *s, rtc_sched_batch *b)
+{
+	if (b->n == b->cap) {
+		/* More events than one file can hold (see the sizing in trace.c):
+		 * apply what is safe, drop the rest (counted). */
+		b->overflow++;
+		rtc_sched_batch_apply(s, b, false, NULL);
+	}
+	rtc_sched_qev *q = &b->ev[b->n++];
+	q->seq = b->seq++;
+	return q;
+}
+
+void rtc_sched_batch_add(rtc_sched *s, rtc_sched_batch *b, const rtc_sched_event *e)
+{
+	rtc_sched_qev *q = batch_slot(s, b);
+	q->t_ns = e->t_ns;
+	q->pid = e->pid;
+	q->tid = e->tid;
+	q->cpu = cpu_of(e->cpu);
+	q->kind = (uint8_t)e->kind;
+	q->prio = (int16_t)(e->prio < -1 ? -1 : e->prio > 32767 ? 32767 : e->prio);
+	cpu_reached(b, e->cpu, e->t_ns);
+}
+
+void rtc_sched_batch_cpu_time(rtc_sched_batch *b, unsigned cpu, uint64_t t_ns)
+{
+	cpu_reached(b, cpu, t_ns);
+}
+
+void rtc_sched_batch_gap(rtc_sched *s, rtc_sched_batch *b, unsigned cpu, uint64_t t_ns, uint64_t n)
+{
+	uint64_t bit = cpu < RTC_SCHED_MAX_CPUS ? 1ull << cpu : 0;
+	if (b->gap_open & bit) {
+		/* A second marker before any event of its CPU: one reset covers
+		 * both. */
+		rtc_sched_qev *g = &b->ev[b->gap_idx[cpu]];
+		uint64_t sum = (uint64_t)g->pid + n;
+		g->pid = sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
+		if (t_ns > g->t_ns)
+			g->t_ns = t_ns;
+		return;
+	}
+	rtc_sched_qev *q = batch_slot(s, b);
+	q->t_ns = t_ns;
+	q->pid = n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
+	q->cpu = cpu_of(cpu);
+	q->kind = RTC_SCHED_GAP;
+	q->prio = -1;
+	q->tid = bit ? 1 : 0; /* open: waits for its CPU's next event, holding the watermark */
+	if (bit) {
+		b->gap_open |= bit;
+		b->gap_idx[cpu] = b->n - 1;
+	}
+}
+
+/* Positions of the open gaps after the entries moved. */
+static void find_open_gaps(rtc_sched_batch *b)
+{
+	b->gap_open = 0;
+	for (size_t j = 0; j < b->n; j++) {
+		const rtc_sched_qev *q = &b->ev[j];
+		if (q->kind == RTC_SCHED_GAP && q->tid == 1 && q->cpu != RTC_SCHED_NO_CPU) {
+			b->gap_open |= 1ull << q->cpu;
+			b->gap_idx[q->cpu] = j;
+		}
+	}
+}
+
+static void apply_one(rtc_sched *s, const rtc_sched_qev *q)
+{
+	if (q->kind == RTC_SCHED_GAP) {
+		rtc_sched_dropped(s, q->pid);
+		return;
+	}
+	rtc_sched_event e = {.cpu = q->cpu == RTC_SCHED_NO_CPU ? RTC_SCHED_MAX_CPUS : q->cpu,
+	                     .t_ns = q->t_ns,
+	                     .pid = q->pid,
+	                     .tid = q->tid,
+	                     .kind = (enum rtc_sched_kind)q->kind,
+	                     .prio = q->prio};
+	rtc_sched_event_in(s, &e);
+}
+
+void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _Atomic bool *stop)
+{
+	if (stop && *stop) {
+		b->n = 0;
+		forget_tracking(b);
+		return;
+	}
+	if (b->n > 1)
+		qsort(b->ev, b->n, sizeof(*b->ev), qev_cmp);
+	if (b->gap_open)
+		find_open_gaps(b);
+
+	/* The watermark: the newest time every CPU has reached. A CPU that had
+	 * events before but none since the last apply holds it at its last
+	 * time once; twice in a row it is released (it went quiet), and the
+	 * pending waits are forgotten since its events may still be missing. */
+	bool reset = false;
+	uint64_t w = UINT64_MAX, newest = 0;
+	for (unsigned c = 0; c < RTC_SCHED_MAX_CPUS; c++) {
+		uint64_t bit = 1ull << c;
+		if (!(b->known & bit))
+			continue;
+		if (b->present & bit) {
+			b->absent[c] = 0;
+		} else if (++b->absent[c] >= 2) {
+			b->known &= ~bit;
+			b->absent[c] = 0;
+			b->cpu_silent++;
+			reset = true;
+			continue;
+		}
+		if (b->last[c] < w)
+			w = b->last[c];
+		if (b->last[c] > newest)
+			newest = b->last[c];
+	}
+	/* A gap still waiting for its CPU's next event: its reset must come
+	 * before everything after it, so nothing from its time on is applied. */
+	for (unsigned c = 0; c < RTC_SCHED_MAX_CPUS; c++)
+		if ((b->gap_open & (1ull << c)) && b->ev[b->gap_idx[c]].t_ns < w)
+			w = b->ev[b->gap_idx[c]].t_ns;
+	if (reset)
+		rtc_sched_dropped(s, 0);
+	b->lag_ns = (w == UINT64_MAX || newest < w) ? 0 : newest - w;
+
+	size_t i = 0;
+	for (; i < b->n && b->ev[i].t_ns < w; i++) {
+		if (stop && (i & 4095) == 4095 && *stop) {
+			b->n = 0;
+			forget_tracking(b);
+			return;
+		}
+		apply_one(s, &b->ev[i]);
+	}
+	size_t k = b->n - i;
+	if (carry) {
+		/* Kept for the next file, still in order. */
+		memmove(b->ev, b->ev + i, k * sizeof(*b->ev));
+		b->n = k;
+		for (size_t j = 0; j < k; j++)
+			b->ev[j].seq = (uint32_t)j;
+		find_open_gaps(b);
+		b->seq = (uint32_t)k;
+		b->present = 0;
+	} else {
+		b->discarded += k;
+		if (k)
+			rtc_sched_dropped(s, 0);
+		b->n = 0;
+		b->seq = 0;
+		forget_tracking(b);
+	}
+}
+
+void rtc_sched_batch_clear(rtc_sched *s, rtc_sched_batch *b)
+{
+	if (b->n) {
+		b->discarded += b->n;
+		rtc_sched_dropped(s, 0);
+	}
+	b->n = 0;
+	b->seq = 0;
+	forget_tracking(b);
 }

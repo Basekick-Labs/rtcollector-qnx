@@ -23,6 +23,11 @@
  * Under load the kernel drops trace events (CONTROL DROPPED): counted, and
  * pending per-thread state is reset so no garbage latency is reported.
  *
+ * Each CPU's events reach the file in its own buffers, so the file is not in
+ * time order. The parser collects a file's scheduling events in a batch
+ * (core/sched.c), sorts them and applies them up to the newest time every
+ * CPU has reached; the rest waits for the next file.
+ *
  *   sched,process=control,thread=loop,pid=..,tid=.. wakeups=..,latency_p50_ns=..,
  *     latency_p99_ns=..,latency_max_ns=..,run_ns=..,preemptions=..,priority=..
  *   cpu_sched,cpu=cpu0 context_switches=..,interrupts=..
@@ -107,11 +112,12 @@ static bool load_tracelog(void)
 
 /* Counters, one writing thread each. */
 typedef struct {
-	rtc_counter sessions, yielded;        /* monitor thread */
-	rtc_counter bytes, bytes_dropped;     /* writer callback (tracer thread) */
-	rtc_counter intervals, files_dropped; /* rotator thread */
+	rtc_counter sessions, yielded;                        /* monitor thread */
+	rtc_counter bytes, bytes_dropped;                     /* writer callback (tracer thread) */
+	rtc_counter intervals, files_dropped, flush_timeouts; /* rotator thread */
 	rtc_counter events, kernel_dropped, parse_ns, parse_errors, threads_overflow, snapshots_lost,
-	    out_of_order, threads_evicted, threads_omitted, vectors_overflow; /* parser */
+	    out_of_order, threads_evicted, threads_omitted, vectors_overflow, ready_repeats, events_discarded,
+	    reorder_overflow, cpu_time_backwards, cpu_silent, watermark_lag_ns; /* parser */
 	rtc_counter unavailable; /* set once, by whichever thread finds out */
 } trace_counters;
 
@@ -151,13 +157,15 @@ static struct {
 	pthread_cond_t qcv;
 	struct {
 		char path[PATH_MAX_T];
-		bool discont;
+		bool discont;    /* does not follow the previous file */
+		bool truncated;  /* lost bytes: its tail is not complete */
 		uint64_t end_ns; /* CLOCK_REALTIME when the interval ended */
 	} queue[QUEUE];
 	unsigned qn;
 
 	/* parser state and the published interval */
 	rtc_sched sched;
+	rtc_sched_batch batch;      /* the current file's events, applied in time order */
 	rtc_sched_snapshot snap[2]; /* parser fills [back], gather reads [front] */
 	unsigned back;
 	pthread_mutex_t pmu;
@@ -215,8 +223,10 @@ static ssize_t on_write(void *cookie, const char *data, size_t sz)
 		rtc_counter_add(&st.k.bytes, sz);
 	} else {
 		/* Over trace_max_bytes, or the write failed (/dev/shmem full): the
-		 * rest of this interval is dropped too, so the file stays a
-		 * continuous run of events and the gap is at its end. */
+		 * rest of this interval is dropped too. Each CPU's buffers cover
+		 * their own span of time, so the file ends earlier for some CPUs
+		 * than for others: the parser applies it only up to the time every
+		 * CPU reached, and drops (counts) the rest. */
 		rtc_counter_add(&st.k.bytes_dropped, sz);
 		st.file_bytes = st.c->cfg.trace_max_bytes;
 		st.truncated = true;
@@ -234,7 +244,7 @@ static int open_next(void)
 }
 
 /* Hands the finished file to the parser; drops the oldest if it is behind. */
-static void enqueue(const char *path, bool discont)
+static void enqueue(const char *path, bool discont, bool truncated)
 {
 	pthread_mutex_lock(&st.qmu);
 	if (st.qn == QUEUE) {
@@ -246,6 +256,7 @@ static void enqueue(const char *path, bool discont)
 	}
 	snprintf(st.queue[st.qn].path, PATH_MAX_T, "%s", path);
 	st.queue[st.qn].end_ns = now_real();
+	st.queue[st.qn].truncated = truncated;
 	st.queue[st.qn++].discont = discont;
 	pthread_cond_signal(&st.qcv);
 	pthread_mutex_unlock(&st.qmu);
@@ -258,7 +269,7 @@ static void rotate(bool start_next)
 	if (st.fd >= 0) {
 		close(st.fd);
 		st.fd = -1;
-		enqueue(st.path, st.cur_discont);
+		enqueue(st.path, st.cur_discont, st.truncated);
 		rtc_counter_add(&st.k.intervals, 1);
 	}
 	st.cur_discont = st.truncated;
@@ -351,14 +362,19 @@ static void *rotator_main(void *arg)
 		uint64_t before = st.writes;
 		pthread_mutex_unlock(&st.fmu);
 		tracelog_flush(st.in);
+		bool flushed = false;
 		for (unsigned w = 0; w < 50; w++) {
 			pthread_mutex_lock(&st.fmu);
 			uint64_t now = st.writes;
 			pthread_mutex_unlock(&st.fmu);
-			if (now >= before + st.ncpu)
+			if (now >= before + st.ncpu) {
+				flushed = true;
 				break;
+			}
 			sleep_ms(1);
 		}
+		if (!flushed)
+			rtc_counter_add(&st.k.flush_timeouts, 1); /* the next file holds the rest */
 		pthread_mutex_lock(&st.fmu);
 		bool hdr = st.hdr_done;
 		pthread_mutex_unlock(&st.fmu);
@@ -568,7 +584,7 @@ static int cb_thread(struct traceparser_state *s, void *u, unsigned h, unsigned 
 		e.kind = RTC_EV_DEAD;
 	else
 		e.kind = RTC_EV_BLOCKED;
-	rtc_sched_event_in(&st.sched, &e);
+	rtc_sched_batch_add(&st.sched, &st.batch, &e);
 	return 0;
 }
 
@@ -577,10 +593,12 @@ static int cb_names(struct traceparser_state *s, void *u, unsigned h, unsigned t
 {
 	if (atomic_load(&st.stopping))
 		return 0; /* shutting down: let the parse run out fast */
-	(void)s;
 	(void)u;
 	(void)t;
 	unsigned ev = _NTO_TRACE_GETEVENT(h);
+	uint64_t t_ns = event_ns(s);
+	if (st.cps)
+		rtc_sched_batch_cpu_time(&st.batch, _NTO_TRACE_GETCPU(h), t_ns);
 	if (l < 3)
 		return 0;
 	char name[RTC_SCHED_NAME * 2];
@@ -590,7 +608,7 @@ static int cb_names(struct traceparser_state *s, void *u, unsigned h, unsigned t
 	memcpy(name, &b[2], room);
 	name[room] = '\0';
 	if (ev == _TRACE_PR_TH_NAME_T)
-		rtc_sched_thread_name(&st.sched, b[0], b[1], name);
+		rtc_sched_thread_name(&st.sched, b[0], b[1], name, st.cps ? t_ns : 0);
 	else if (ev == _TRACE_PR_TH_CREATE_P_NAME)
 		rtc_sched_process_name(&st.sched, b[1], name);
 	return 0;
@@ -600,9 +618,11 @@ static int cb_int(struct traceparser_state *s, void *u, unsigned h, unsigned t, 
 {
 	if (atomic_load(&st.stopping))
 		return 0; /* shutting down: let the parse run out fast */
-	(void)s;
 	(void)u;
 	(void)t;
+	uint64_t t_ns = event_ns(s);
+	if (st.cps)
+		rtc_sched_batch_cpu_time(&st.batch, _NTO_TRACE_GETCPU(h), t_ns);
 	if (l >= 1)
 		rtc_sched_interrupt(&st.sched, _NTO_TRACE_GETCPU(h), b[0]);
 	return 0;
@@ -612,20 +632,27 @@ static int cb_control(struct traceparser_state *s, void *u, unsigned h, unsigned
 {
 	if (atomic_load(&st.stopping))
 		return 0; /* shutting down: let the parse run out fast */
-	(void)s;
 	(void)u;
 	(void)t;
 	if (_NTO_TRACE_GETEVENT(h) == _NTO_TRACE_CONTROLDROPPED && l >= 1) {
-		rtc_sched_dropped(&st.sched, b[0]);
+		uint64_t t_ns = event_ns(s);
+		if (st.cps == 0) {
+			st.no_clock++; /* the file is not parsed as complete: pending waits go */
+			t_ns = 0;
+		}
+		rtc_sched_batch_gap(&st.sched, &st.batch, _NTO_TRACE_GETCPU(h), t_ns, b[0]);
 		rtc_counter_add(&st.k.kernel_dropped, b[0]);
 	}
 	return 0;
 }
 
-static void parse_file(const char *path, bool discont, uint64_t end_ns)
+static void parse_file(const char *path, bool discont, bool truncated, uint64_t end_ns)
 {
-	if (discont)
+	if (discont) {
+		/* Events kept from the previous file do not continue here. */
+		rtc_sched_batch_clear(&st.sched, &st.batch);
 		rtc_sched_dropped(&st.sched, 0); /* the gap is counted where it happened */
+	}
 	uint64_t before = st.sched.events;
 	struct timespec a, z;
 	clock_gettime(CLOCK_MONOTONIC, &a);
@@ -644,6 +671,9 @@ static void parse_file(const char *path, bool discont, uint64_t end_ns)
 		ok = traceparser(s, NULL, path) == 0 && st.no_clock == 0;
 		traceparser_destroy(&s);
 	}
+	/* In time order, up to what every CPU reached. A complete file's tail
+	 * waits for the next one; an incomplete one's is dropped (counted). */
+	rtc_sched_batch_apply(&st.sched, &st.batch, ok && !truncated, &st.stopping);
 	if (!ok) {
 		/* Part of the file was not read: the next file does not follow
 		 * what was applied, so pending waits are forgotten. */
@@ -658,6 +688,12 @@ static void parse_file(const char *path, bool discont, uint64_t end_ns)
 	rtc_counter_set(&st.k.out_of_order, st.sched.out_of_order);
 	rtc_counter_set(&st.k.threads_evicted, st.sched.threads_evicted);
 	rtc_counter_set(&st.k.vectors_overflow, st.sched.vectors_overflow);
+	rtc_counter_set(&st.k.ready_repeats, st.sched.ready_repeats);
+	rtc_counter_set(&st.k.events_discarded, st.batch.discarded);
+	rtc_counter_set(&st.k.reorder_overflow, st.batch.overflow);
+	rtc_counter_set(&st.k.cpu_time_backwards, st.batch.cpu_backwards);
+	rtc_counter_set(&st.k.cpu_silent, st.batch.cpu_silent);
+	rtc_counter_set(&st.k.watermark_lag_ns, st.batch.lag_ns);
 
 	if (atomic_load(&st.stopping))
 		return;
@@ -692,17 +728,27 @@ static void *parser_main(void *arg)
 		}
 		snprintf(path, sizeof(path), "%s", st.queue[0].path);
 		bool discont = st.queue[0].discont;
+		bool truncated = st.queue[0].truncated;
 		uint64_t end_ns = st.queue[0].end_ns;
 		memmove(&st.queue[0], &st.queue[1], sizeof(st.queue[0]) * (QUEUE - 1));
 		st.qn--;
 		pthread_mutex_unlock(&st.qmu);
-		parse_file(path, discont, end_ns);
+		parse_file(path, discont, truncated, end_ns);
 		unlink(path);
 	}
 	return NULL;
 }
 
 /* --- input ------------------------------------------------------------------ */
+
+static void free_tables(void)
+{
+	rtc_sched_free(&st.sched);
+	rtc_sched_snapshot_free(&st.snap[0]);
+	rtc_sched_snapshot_free(&st.snap[1]);
+	rtc_sched_snapshot_free(&st.out);
+	rtc_sched_batch_free(&st.batch);
+}
 
 static int init(rtc_collector *c)
 {
@@ -715,11 +761,18 @@ static int init(rtc_collector *c)
 	pthread_mutex_init(&st.qmu, NULL);
 	pthread_mutex_init(&st.pmu, NULL);
 	pthread_cond_init(&st.qcv, NULL);
+	/* The sort batch: every kernel trace event takes at least 16 bytes of
+	 * the file and a file holds at most trace_max_bytes, so one file never
+	 * has more events than this (24 bytes each: 1.5 x trace_max_bytes).
+	 * Thread events, the only ones kept, take two 16-byte slots in wide
+	 * mode, which leaves room for what one file carries to the next. */
 	if (rtc_sched_init(&st.sched, c->cfg.trace_max_threads) != 0 ||
 	    rtc_sched_snapshot_init(&st.snap[0], c->cfg.trace_max_rows) != 0 ||
 	    rtc_sched_snapshot_init(&st.snap[1], c->cfg.trace_max_rows) != 0 ||
-	    rtc_sched_snapshot_init(&st.out, c->cfg.trace_max_rows) != 0) {
+	    rtc_sched_snapshot_init(&st.out, c->cfg.trace_max_rows) != 0 ||
+	    rtc_sched_batch_init(&st.batch, c->cfg.trace_max_bytes / 16) != 0) {
 		RTC_ERROR(C, "cannot allocate the trace tables");
+		free_tables(); /* not added as an input: destroy() will not run */
 		return -1;
 	}
 	return 0;
@@ -831,10 +884,7 @@ static void destroy(rtc_collector *c)
 	(void)c;
 	if (st.parser_stuck)
 		return; /* it may still be reading them; the process is exiting */
-	rtc_sched_free(&st.sched);
-	rtc_sched_snapshot_free(&st.snap[0]);
-	rtc_sched_snapshot_free(&st.snap[1]);
-	rtc_sched_snapshot_free(&st.out);
+	free_tables();
 }
 
 static void emit_u(rtc_rec_builder *b, const char *k, uint64_t v)
@@ -933,6 +983,13 @@ static int gather(rtc_collector *c)
 	emit_u(&b, "threads_evicted", rtc_counter_get(&st.k.threads_evicted));
 	emit_u(&b, "vectors_overflow", rtc_counter_get(&st.k.vectors_overflow));
 	emit_u(&b, "snapshots_lost", rtc_counter_get(&st.k.snapshots_lost));
+	emit_u(&b, "ready_repeats", rtc_counter_get(&st.k.ready_repeats));
+	emit_u(&b, "events_discarded", rtc_counter_get(&st.k.events_discarded));
+	emit_u(&b, "reorder_overflow", rtc_counter_get(&st.k.reorder_overflow));
+	emit_u(&b, "cpu_time_backwards", rtc_counter_get(&st.k.cpu_time_backwards));
+	emit_u(&b, "cpu_silent", rtc_counter_get(&st.k.cpu_silent));
+	emit_u(&b, "watermark_lag_ns", rtc_counter_get(&st.k.watermark_lag_ns));
+	emit_u(&b, "flush_timeouts", rtc_counter_get(&st.k.flush_timeouts));
 	emit_u(&b, "unavailable", rtc_counter_get(&st.k.unavailable));
 	rtc_emit(c, &b);
 	return 0;

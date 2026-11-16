@@ -45,7 +45,7 @@ static void latency_preemption_runtime(void)
 	ev(0, 900, 7, 1, RTC_EV_READY, 40);    /* repeat READY does not move the start */
 	ev(1, 1000, 7, 1, RTC_EV_RUNNING, 40); /* resumes on another CPU */
 	ev(1, 1100, 7, 1, RTC_EV_BLOCKED, 40);
-	rtc_sched_thread_name(&S, 7, 1, "loop");
+	rtc_sched_thread_name(&S, 7, 1, "loop", 0);
 	rtc_sched_process_name(&S, 7, "proc/boot/control");
 	rtc_sched_snapshot o;
 	CHECK(rtc_sched_snapshot_init(&o, 8) == 0);
@@ -226,7 +226,7 @@ static void no_eviction_without_pressure(void)
 	CHECK(rtc_sched_init(&S, 64) == 0);
 	rtc_sched_snapshot o;
 	rtc_sched_snapshot_init(&o, 64);
-	rtc_sched_thread_name(&S, 9, 1, "watchdog");
+	rtc_sched_thread_name(&S, 9, 1, "watchdog", 0);
 	ev(0, 10, 9, 1, RTC_EV_READY, 50);
 	ev(0, 11, 9, 1, RTC_EV_RUNNING, 50);
 	ev(0, 12, 9, 1, RTC_EV_BLOCKED, 50);
@@ -321,6 +321,351 @@ static void high_priority_selection_by_latency(void)
 	rtc_sched_free(&S);
 }
 
+/* --- the batch: events of a file applied in time order ------------------- */
+
+static rtc_sched_batch B;
+
+static void bev(unsigned cpu, uint64_t t, uint32_t pid, uint32_t tid, enum rtc_sched_kind k)
+{
+	rtc_sched_event e = {cpu, t, pid, tid, k, 20};
+	rtc_sched_batch_add(&S, &B, &e);
+}
+
+static rtc_sched_thread *thread_of(uint32_t pid, uint32_t tid)
+{
+	for (size_t i = 0; i < S.max_threads; i++)
+		if (S.threads[i].used && S.threads[i].pid == pid && S.threads[i].tid == tid)
+			return &S.threads[i];
+	return NULL;
+}
+
+static void batch_setup(size_t cap)
+{
+	CHECK(rtc_sched_init(&S, 4096) == 0);
+	CHECK(rtc_sched_batch_init(&B, cap) == 0);
+}
+
+static void batch_teardown(void)
+{
+	rtc_sched_batch_free(&B);
+	rtc_sched_free(&S);
+}
+
+/* A thread woken every 10 µs, waking on CPU0 or CPU1 and running on CPU1
+ * or CPU2, whose buffers reach the file one after the other. Every real
+ * wait is 100 ns. In arrival order the late RUNNING of the first wake-up
+ * reads as a 10.1 µs wait (the bug); sorted, both waits are 100 ns. */
+static void feed_buffers(void)
+{
+	/* CPU0's buffer */
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	/* CPU1's buffer */
+	bev(1, 30000, 9, 1, RTC_EV_READY);
+	bev(1, 30100, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 1, 40000);
+	/* CPU2's buffer */
+	bev(2, 20100, 9, 1, RTC_EV_RUNNING);
+	bev(2, 21000, 9, 1, RTC_EV_BLOCKED);
+	rtc_sched_batch_cpu_time(&B, 2, 40000);
+}
+
+static void batch_buffer_order(void)
+{
+	/* The bug, applied as it arrives. */
+	CHECK(rtc_sched_init(&S, 64) == 0);
+	ev(0, 20000, 9, 1, RTC_EV_READY, 20);
+	ev(1, 30000, 9, 1, RTC_EV_READY, 20);
+	ev(1, 30100, 9, 1, RTC_EV_RUNNING, 20);
+	ev(2, 20100, 9, 1, RTC_EV_RUNNING, 20);
+	ev(2, 21000, 9, 1, RTC_EV_BLOCKED, 20);
+	CHECK_EQ_U(thread_of(9, 1)->lat.max, 10100);
+	rtc_sched_free(&S);
+
+	/* The same buffers through the batch. */
+	batch_setup(64);
+	feed_buffers();
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t != NULL);
+	if (t) {
+		CHECK_EQ_U(t->wakeups, 2);
+		CHECK_EQ_U(t->lat.max, 100);
+		CHECK_EQ_U(t->run_ns, 900);
+		CHECK_EQ_U(t->preemptions, 0);
+	}
+	CHECK_EQ_U(S.out_of_order, 0);
+	CHECK_EQ_U(S.ready_repeats, 0);
+	CHECK_EQ_U(B.n, 0); /* everything was before every CPU's newest time */
+	batch_teardown();
+}
+
+/* The same buffers split over two files: CPU2's events arrive with the
+ * next file. Its earlier event in the first file makes it hold the
+ * watermark, so the first file's later events wait. */
+static void batch_watermark_carry(void)
+{
+	batch_setup(64);
+	rtc_sched_batch_cpu_time(&B, 2, 10000); /* CPU2 reached 10 µs */
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	bev(1, 30000, 9, 1, RTC_EV_READY);
+	bev(1, 30100, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t == NULL || t->wakeups == 0);
+	CHECK_EQ_U(B.n, 3); /* all after 10 µs: carried */
+	CHECK_EQ_U(B.lag_ns, 20100);
+	/* The next file. */
+	bev(2, 20100, 9, 1, RTC_EV_RUNNING);
+	bev(2, 21000, 9, 1, RTC_EV_BLOCKED);
+	rtc_sched_batch_cpu_time(&B, 2, 40000);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_cpu_time(&B, 1, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	t = thread_of(9, 1);
+	CHECK(t != NULL);
+	if (t) {
+		CHECK_EQ_U(t->wakeups, 2);
+		CHECK_EQ_U(t->lat.max, 100);
+	}
+	CHECK_EQ_U(S.out_of_order, 0);
+	CHECK_EQ_U(B.discarded, 0);
+	CHECK_EQ_U(B.n, 0);
+	batch_teardown();
+}
+
+/* A RUNNING delivered before the READY that caused it. */
+static void batch_running_before_ready(void)
+{
+	batch_setup(64);
+	bev(1, 20100, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 1, 30000);
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 0, 30000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 1 && t->lat.max == 100);
+	batch_teardown();
+}
+
+/* Equal times. A READY and the RUNNING it caused can share a timestamp on
+ * two CPUs: READY first. Otherwise arrival order (here RUNNING then
+ * BLOCKED at the same time on one CPU: a run of 0, not a preemption).
+ * Many entries, so a sort that ignores seq shows it. */
+static void batch_ties(void)
+{
+	batch_setup(16384);
+	for (uint32_t i = 1; i <= 2000; i++) /* CPU1's buffer first */ {
+		bev(1, 1000, 30, i, RTC_EV_RUNNING);
+		bev(1, 1000, 30, i, RTC_EV_BLOCKED);
+		bev(1, 1600, 30, i, RTC_EV_RUNNING);
+	}
+	rtc_sched_batch_cpu_time(&B, 1, 9000);
+	for (uint32_t i = 1; i <= 2000; i++) {
+		bev(0, 1000, 30, i, RTC_EV_READY);
+		bev(0, 1500, 30, i, RTC_EV_READY);
+	}
+	rtc_sched_batch_cpu_time(&B, 0, 9000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	uint64_t wk = 0, pre = 0, max = 0;
+	for (uint32_t i = 1; i <= 2000; i++) {
+		rtc_sched_thread *t = thread_of(30, i);
+		if (!t)
+			continue;
+		wk += t->wakeups;
+		pre += t->preemptions;
+		if (t->lat.max > max)
+			max = t->lat.max;
+	}
+	CHECK_EQ_U(wk, 4000);
+	CHECK_EQ_U(pre, 0);
+	CHECK_EQ_U(max, 100);
+	CHECK_EQ_U(S.ready_repeats, 0);
+	batch_teardown();
+}
+
+/* A truncated file: CPU1's last buffers were dropped, so it ends at 20 µs
+ * while CPU0 goes on. CPU0's READY at 30 µs has no RUNNING in the file (it
+ * was on CPU1): applied, the thread's next RUNNING would read as a wait.
+ * Past the watermark it is dropped, counted, and waits are forgotten. */
+static void batch_truncated_tail(void)
+{
+	batch_setup(64);
+	bev(1, 15000, 9, 2, RTC_EV_READY);
+	bev(1, 15050, 9, 2, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 1, 20000);
+	bev(0, 30000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, false, NULL);
+	CHECK_EQ_U(B.discarded, 1);
+	CHECK_EQ_U(B.n, 0);
+	rtc_sched_thread *t2 = thread_of(9, 2);
+	CHECK(t2 && t2->wakeups == 1 && t2->lat.max == 50); /* before the watermark: kept */
+	/* The next file starts after a gap. */
+	rtc_sched_batch_clear(&S, &B);
+	bev(0, 50000, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 60000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t == NULL || t->wakeups == 0);
+	batch_teardown();
+}
+
+/* The kernel dropped events of CPU1 from 21 µs to 26 µs; the marker says
+ * so at 21 µs (the start). A READY on CPU0 at 23 µs whose RUNNING was lost
+ * on CPU1 must not pair with a later RUNNING: the reset goes at CPU1's next
+ * event (26 µs), after the READY. */
+static void batch_gap_at_next_event(void)
+{
+	batch_setup(64);
+	bev(0, 23000, 9, 1, RTC_EV_READY);
+	bev(0, 30000, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_gap(&S, &B, 1, 21000, 7);
+	rtc_sched_batch_cpu_time(&B, 1, 26000);
+	rtc_sched_batch_cpu_time(&B, 1, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 0);
+	CHECK_EQ_U(S.drops, 7);
+	batch_teardown();
+
+	/* A marker with no later event of its CPU yet holds the watermark: its
+	 * reset and everything after it wait for the next file. */
+	batch_setup(64);
+	rtc_sched_batch_cpu_time(&B, 1, 45000);
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	bev(0, 20100, 9, 1, RTC_EV_RUNNING);
+	bev(0, 52000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 0, 60000);
+	rtc_sched_batch_gap(&S, &B, 1, 50000, 3);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 1 && t->lat.max == 100);
+	CHECK_EQ_U(S.drops, 0);
+	CHECK_EQ_U(B.n, 2); /* the gap and the READY at 52 µs */
+	/* CPU1's next event: the reset lands at 55 µs, after that READY. */
+	rtc_sched_batch_cpu_time(&B, 1, 55000);
+	bev(0, 58000, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 1, 70000);
+	rtc_sched_batch_cpu_time(&B, 0, 70000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(S.drops, 3);
+	CHECK(t->wakeups == 1); /* the READY at 52 µs was forgotten, not paired */
+	batch_teardown();
+}
+
+/* More events than the batch holds: what is safe is applied, the rest is
+ * dropped and counted, and no wait is invented. */
+static void batch_overflow(void)
+{
+	batch_setup(4);
+	rtc_sched_batch_cpu_time(&B, 2, 10000);
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	bev(1, 30000, 9, 1, RTC_EV_READY);
+	bev(1, 30100, 9, 1, RTC_EV_RUNNING);
+	bev(2, 20100, 9, 1, RTC_EV_RUNNING);
+	bev(2, 21000, 9, 1, RTC_EV_BLOCKED); /* the 5th: overflow */
+	bev(1, 50000, 9, 1, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 60000);
+	rtc_sched_batch_cpu_time(&B, 1, 60000);
+	rtc_sched_batch_cpu_time(&B, 2, 60000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.overflow, 1);
+	CHECK(B.discarded >= 1);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t != NULL);
+	if (t)
+		CHECK(t->lat.n == 0 || t->lat.max <= 100);
+	batch_teardown();
+}
+
+/* tids are reused at once. The new thread's name arrives (applied on
+ * arrival) before the old thread's events, which are applied sorted, DEAD
+ * included: the slot and the name stay with the new thread. */
+static void batch_tid_reuse_keeps_name(void)
+{
+	batch_setup(64);
+	rtc_sched_thread_name(&S, 5, 2, "new", 11000);
+	bev(0, 1000, 5, 2, RTC_EV_READY);
+	bev(0, 1100, 5, 2, RTC_EV_RUNNING);
+	bev(0, 10000, 5, 2, RTC_EV_DEAD);
+	bev(0, 12000, 5, 2, RTC_EV_READY);
+	bev(0, 12300, 5, 2, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 20000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(5, 2);
+	CHECK(t != NULL);
+	if (t) {
+		CHECK(!strcmp(t->name, "new"));
+		CHECK_EQ_U(t->wakeups, 1);
+		CHECK_EQ_U(t->lat.max, 300);
+	}
+	CHECK_EQ_U(S.exited_unreported, 1);
+	/* A later DEAD (this thread's own) frees the slot as before. */
+	bev(0, 25000, 5, 2, RTC_EV_DEAD);
+	rtc_sched_batch_cpu_time(&B, 0, 30000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK(thread_of(5, 2) == NULL);
+	batch_teardown();
+}
+
+/* An event older than the thread's newest forgets its pending wait. */
+static void out_of_order_resets_wait(void)
+{
+	CHECK(rtc_sched_init(&S, 64) == 0);
+	ev(0, 100, 9, 1, RTC_EV_READY, 20);
+	ev(0, 200, 9, 1, RTC_EV_RUNNING, 20);
+	ev(0, 300, 9, 1, RTC_EV_READY, 20);
+	ev(1, 250, 9, 1, RTC_EV_BLOCKED, 20); /* older: ignored */
+	ev(0, 5000, 9, 1, RTC_EV_RUNNING, 20);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t && t->wakeups == 1 && t->lat.max == 100);
+	CHECK_EQ_U(S.out_of_order, 1);
+	rtc_sched_free(&S);
+}
+
+/* A CPU seen before and silent now holds the watermark once; silent twice
+ * it is released (counted) and pending waits are forgotten. */
+static void batch_silent_cpu(void)
+{
+	batch_setup(64);
+	rtc_sched_batch_cpu_time(&B, 0, 10000);
+	rtc_sched_batch_cpu_time(&B, 1, 10000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 0, 30000);
+	rtc_sched_batch_apply(&S, &B, true, NULL); /* CPU1 silent once: holds at 10 µs */
+	CHECK_EQ_U(B.n, 1);
+	CHECK_EQ_U(B.cpu_silent, 0);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL); /* twice: released */
+	CHECK_EQ_U(B.cpu_silent, 1);
+	CHECK_EQ_U(B.n, 0);
+	batch_teardown();
+}
+
+/* clear forgets what was kept (counted); a stopping apply applies nothing. */
+static void batch_clear_and_stop(void)
+{
+	batch_setup(64);
+	rtc_sched_batch_cpu_time(&B, 1, 10000);
+	bev(0, 20000, 9, 1, RTC_EV_READY);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.n, 1);
+	rtc_sched_batch_clear(&S, &B);
+	CHECK_EQ_U(B.n, 0);
+	CHECK_EQ_U(B.discarded, 1);
+	_Atomic bool stop = true;
+	bev(0, 30000, 9, 3, RTC_EV_READY);
+	bev(0, 30100, 9, 3, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, true, &stop);
+	CHECK(thread_of(9, 3) == NULL);
+	CHECK_EQ_U(B.n, 0);
+	batch_teardown();
+}
+
 const t_case sched_cases[] = {
     {"sched", "out_of_order_ignored", out_of_order_ignored},
     {"sched", "histogram", histogram},
@@ -333,5 +678,16 @@ const t_case sched_cases[] = {
     {"sched", "no_eviction_without_pressure", no_eviction_without_pressure},
     {"sched", "deletion_keeps_lookups", deletion_keeps_lookups},
     {"sched", "high_priority_selection_by_latency", high_priority_selection_by_latency},
+    {"sched", "batch_buffer_order", batch_buffer_order},
+    {"sched", "batch_watermark_carry", batch_watermark_carry},
+    {"sched", "batch_running_before_ready", batch_running_before_ready},
+    {"sched", "batch_ties", batch_ties},
+    {"sched", "batch_truncated_tail", batch_truncated_tail},
+    {"sched", "batch_gap_at_next_event", batch_gap_at_next_event},
+    {"sched", "batch_overflow", batch_overflow},
+    {"sched", "batch_tid_reuse_keeps_name", batch_tid_reuse_keeps_name},
+    {"sched", "out_of_order_resets_wait", out_of_order_resets_wait},
+    {"sched", "batch_silent_cpu", batch_silent_cpu},
+    {"sched", "batch_clear_and_stop", batch_clear_and_stop},
     {0},
 };

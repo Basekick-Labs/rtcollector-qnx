@@ -159,8 +159,9 @@ How it works and what it costs:
   before you keep it on in production. If `trace_priority` cannot be had
   (above 63 needs root or `PROCMGR_AID_PRIORITY`), the threads run at the
   priority they inherit and `priority_fallback` is counted.
-- Memory: about 1.3 KB per tracked thread (`trace_max_threads`), and up to
-  four files of `trace_max_bytes` in `/dev/shmem` (RAM): the one being
+- Memory: about 1.3 KB per tracked thread (`trace_max_threads`), a sort
+  buffer of 1.5 × `trace_max_bytes` for the parser (allocated at start), and
+  up to four files of `trace_max_bytes` in `/dev/shmem` (RAM): the one being
   written, two waiting, one being parsed.
 - If real-time threads keep the collector's threads from running, the kernel
   drops events rather than wait (`kernel_dropped`). Bytes over
@@ -170,8 +171,24 @@ How it works and what it costs:
   parsed completely, and after a yield, the pending
   ready-to-running waits are forgotten: a gap never turns into a false
   latency.
-- Each CPU's events reach the file separately, so an event can arrive after a
-  later one of the same thread; it is ignored and counted (`out_of_order`).
+- Each CPU's events reach the file in its own buffers, so the file is not in
+  time order: a thread that wakes on one CPU and runs on another has its
+  events in different buffers. The parser sorts each file's events by time
+  and applies them only up to the newest time every CPU has reached; the
+  rest waits for the next file. In an incomplete file (bytes over
+  `trace_max_bytes`, or one the parser could not read to the end) that rest
+  is dropped instead (`events_discarded`) and pending waits are forgotten.
+  An event still older than one already applied for its thread is ignored,
+  its thread's pending wait forgotten, and counted (`out_of_order`; 0 in
+  practice). A kernel drop forgets pending waits at the time of its CPU's
+  next event, so the whole loss lies before the reset.
+- How much trace a system makes varies: an idle Raspberry Pi 4 produces
+  about 1 MB of events per second. With the defaults (`trace_interval` =
+  `interval` = 10 s, `trace_max_bytes` 4 MiB) most of every interval is
+  over the cap there. Use `trace_interval: 1` with `interval: 1` (a
+  `trace_interval` shorter than `interval` loses intervals:
+  `snapshots_lost`), or raise `trace_max_bytes`. `bytes_dropped` says
+  which.
 - A thread whose exit was in dropped events would hold its table slot for
   ever. When the table is three-quarters full, threads with no event for two
   intervals that are not ready or running are dropped from it, down to half
@@ -202,7 +219,16 @@ How it works and what it costs:
 parse), `parse_errors` (files not read to the end, or without a clock rate),
 `threads_overflow`, `out_of_order`, `threads_omitted`, `threads_evicted`,
 `vectors_overflow` (interrupt vectors past 64, not reported), `snapshots_lost`
-(an interval parsed but not collected), `unavailable`.
+(an interval parsed but not collected), `unavailable`, `events_discarded`
+(past the newest common time of an incomplete file), `reorder_overflow`
+(a file with more events than the sort buffer: expected 0),
+`cpu_time_backwards` (a CPU's events not in time order in the file: expected
+0, the sort relies on it), `cpu_silent` (a CPU with no event for two
+intervals stopped holding the others back), `ready_repeats` (a thread made
+ready while already ready: rare, at equal timestamps), `watermark_lag_ns`
+(the last file: newest event minus the newest common time, held for the next
+file), `flush_timeouts` (an interval switch that did not see every CPU's
+buffer within 50 ms: the next file holds the rest).
 
 ## Running
 
@@ -254,7 +280,7 @@ outputs:
 | `trace_top` | `16` | Lower-priority threads reported: the ones with the highest p99 (0–256) |
 | `trace_max_rows` | `64` | `sched` rows per interval, at most (1–4096) |
 | `trace_max_threads` | `1024` | Threads tracked at once (16–16384), about 1.3 KB each |
-| `trace_max_bytes` | `4MiB` | Trace bytes kept per interval (64KiB–64MiB); up to four times this in RAM |
+| `trace_max_bytes` | `4MiB` | Trace bytes kept per interval (64KiB–64MiB); up to four times this in RAM, plus 1.5 times for the parser's sort buffer |
 | `debug` | `false` | Verbose logging (same as `-d`) |
 | `inputs` | `[internal]` | Inputs to run; `internal` is always on. Names not available in this build are skipped with a warning |
 | `once` | `false` | Same as `--once` |

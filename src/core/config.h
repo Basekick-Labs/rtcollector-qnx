@@ -22,7 +22,8 @@
  *   trace_interval: =interval  seconds per kernel-trace interval (input trace)
  *   trace_priority: 15      the trace logger's priority (below real-time work)
  *   trace_min_priority: 40, trace_top: 16, trace_max_rows: 64   which threads get rows
- *   trace_max_threads: 1024, trace_max_bytes: 4MiB   bounds
+ *   trace_max_threads: 1024, trace_max_bytes: 4MiB   bounds (the parser's sort
+ *                           buffer is 1.5 x trace_max_bytes)
  *   rmgr_buffer_bytes: 256KiB, max_write_bytes: 4096, rmgr_drain_bytes: 64KiB
  *   inputs: [internal, ...] a name, or {name: {config}}
  *   outputs:

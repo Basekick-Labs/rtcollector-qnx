@@ -77,10 +77,12 @@ nb=$(echo "$out" | grep -E '^[0-9]+$' | tail -2 | head -1); nh=$(echo "$out" | g
 [ "$nb" = "200" ] && [ "${nh:-0}" -ge 1 ] && ok "trace + rmgr: 200/200 published lines, device threads in sched rows" || { bad "trace + rmgr: lines=$nb handler rows=$nh"; echo "$out" | tail -3; }
 
 # Unpinned: wakers and wakees on different CPUs, whose kernel buffers reach
-# the file in any order. Out-of-order events stay rare and no false latency.
+# the file in any order. The parser applies them in time order: each CPU's
+# own events are in order, out-of-order events stay rare, no false latency.
 out=$(SER "cd /tmp; ./rtcollector --config trace.yml > /tmp/tu.out 2>&1 & sleep 1; for i in 1 2 3 4 5 6; do on -p 20 ./rtc_hog -b 1 -s 1 -t 6 & done; on -p 30 ./rtc_hog -b 3 -s 2 -t 6 & sleep 7; slay -f rtcollector; sleep 1; grep ^internal_trace /tmp/tu.out | tail -1; grep '^sched' /tmp/tu.out | sed -n 's/.*latency_max_ns=\\([0-9]*\\)i.*/\\1/p' | sort -n | tail -1")
-ev=$(field "$(echo "$out" | grep ^internal_trace)" events); oo=$(field "$(echo "$out" | grep ^internal_trace)" out_of_order); mx=$(echo "$out" | tail -1)
-[ "${ev:-0}" -gt 0 ] && [ $(( ${oo:-0} * 100 )) -lt "$ev" ] && [ "${mx:-0}" -lt 100000000 ] && ok "unpinned: out_of_order ${oo}/${ev} events, max latency ${mx} ns" || { bad "unpinned: out_of_order=${oo:-?} events=${ev:-?} max=${mx:-?}"; }
+it=$(echo "$out" | grep ^internal_trace)
+ev=$(field "$it" events); oo=$(field "$it" out_of_order); cb=$(field "$it" cpu_time_backwards); mx=$(echo "$out" | tail -1)
+[ "${ev:-0}" -gt 0 ] && [ $(( ${oo:-0} * 1000 )) -lt "$ev" ] && [ "${cb:-1}" = "0" ] && [ "${mx:-0}" -lt 100000000 ] && ok "unpinned: out_of_order ${oo}/${ev} events, cpu_time_backwards 0, max latency ${mx} ns" || { bad "unpinned: out_of_order=${oo:-?} events=${ev:-?} cpu_time_backwards=${cb:-?} max=${mx:-?}"; }
 
 # Starvation: four prio-30 hogs busy 2.5 s at a time (50 ms pauses, enough
 # for every waiter to run), one per CPU, above the logger (15): the

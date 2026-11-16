@@ -339,10 +339,12 @@ static rtc_sched_thread *thread_of(uint32_t pid, uint32_t tid)
 	return NULL;
 }
 
+/* A batch in the middle of a stream (rtc_sched_batch_clear starts a gap). */
 static void batch_setup(size_t cap)
 {
 	CHECK(rtc_sched_init(&S, 4096) == 0);
 	CHECK(rtc_sched_batch_init(&B, cap) == 0);
+	B.head = false;
 }
 
 static void batch_teardown(void)
@@ -573,10 +575,10 @@ static void batch_overflow(void)
 	rtc_sched_batch_apply(&S, &B, true, NULL);
 	CHECK_EQ_U(B.overflow, 1);
 	CHECK(B.discarded >= 1);
+	/* After the overflow the CPUs resume at different times (a gap): what
+	 * is left is trimmed or applied, never a wait that did not happen. */
 	rtc_sched_thread *t = thread_of(9, 1);
-	CHECK(t != NULL);
-	if (t)
-		CHECK(t->lat.n == 0 || t->lat.max <= 100);
+	CHECK(t == NULL || t->lat.n == 0 || t->lat.max <= 100);
 	batch_teardown();
 }
 
@@ -751,6 +753,7 @@ static void batch_expected_cpu(void)
 	rtc_sched_batch_cpu_time(&B, 0, 60000);
 	rtc_sched_batch_apply(&S, &B, true, NULL);
 	CHECK_EQ_U(B.n, 1);
+	rtc_sched_batch_cpu_time(&B, 1, 45000); /* CPU1 resumes before the READY */
 	bev(1, 50100, 9, 1, RTC_EV_RUNNING);
 	rtc_sched_batch_cpu_time(&B, 1, 70000);
 	rtc_sched_batch_cpu_time(&B, 0, 70000);
@@ -782,6 +785,58 @@ static void batch_expected_cpu(void)
 	batch_teardown();
 }
 
+/* After a gap (the first file, or one after a truncated file), each CPU's
+ * first buffer can start at a different time: CPU1's starts before the
+ * gap ended, with a READY whose RUNNING (on CPU0) was in the lost part.
+ * Events before the latest first time of the CPUs are not complete: they
+ * are dropped (counted), or the READY pairs with a RUNNING a period later. */
+static void batch_head_after_gap(void)
+{
+	batch_setup(64);
+	rtc_sched_batch_clear(&S, &B);
+	bev(1, 18000, 9, 1, RTC_EV_READY); /* CPU1's buffer starts early */
+	bev(1, 21000, 9, 2, RTC_EV_READY);
+	rtc_sched_batch_cpu_time(&B, 1, 40000);
+	rtc_sched_batch_cpu_time(&B, 0, 20000); /* CPU0's starts at 20 µs */
+	bev(0, 21100, 9, 2, RTC_EV_RUNNING);
+	bev(0, 23000, 9, 1, RTC_EV_RUNNING); /* the next period's run */
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t = thread_of(9, 1);
+	CHECK(t == NULL || t->wakeups == 0);
+	rtc_sched_thread *t2 = thread_of(9, 2);
+	CHECK(t2 && t2->wakeups == 1 && t2->lat.max == 100);
+	CHECK_EQ_U(B.discarded, 1);
+	/* The next contiguous file is not trimmed. */
+	bev(1, 41000, 9, 3, RTC_EV_READY);
+	bev(0, 41200, 9, 3, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 0, 50000);
+	rtc_sched_batch_cpu_time(&B, 1, 50000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t3 = thread_of(9, 3);
+	CHECK(t3 && t3->wakeups == 1 && t3->lat.max == 200);
+	CHECK_EQ_U(B.discarded, 1);
+	batch_teardown();
+
+	/* A CPU that resumes only in the second file after the gap: the first
+	 * file is held, and the head is the time that CPU resumed. */
+	batch_setup(64);
+	rtc_sched_batch_expect(&B, 2);
+	rtc_sched_batch_clear(&S, &B);
+	bev(0, 25000, 9, 4, RTC_EV_READY); /* its RUNNING, on CPU1, was lost */
+	rtc_sched_batch_cpu_time(&B, 0, 28000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	CHECK_EQ_U(B.n, 1);
+	rtc_sched_batch_cpu_time(&B, 1, 30000); /* CPU1 resumes */
+	bev(1, 35000, 9, 4, RTC_EV_RUNNING);
+	rtc_sched_batch_cpu_time(&B, 1, 40000);
+	rtc_sched_batch_cpu_time(&B, 0, 40000);
+	rtc_sched_batch_apply(&S, &B, true, NULL);
+	rtc_sched_thread *t4 = thread_of(9, 4);
+	CHECK(t4 == NULL || t4->wakeups == 0);
+	batch_teardown();
+}
+
 const t_case sched_cases[] = {
     {"sched", "out_of_order_ignored", out_of_order_ignored},
     {"sched", "histogram", histogram},
@@ -809,5 +864,6 @@ const t_case sched_cases[] = {
     {"sched", "batch_gap_unknown_cpu_holds", batch_gap_unknown_cpu_holds},
     {"sched", "batch_order_key", batch_order_key},
     {"sched", "batch_expected_cpu", batch_expected_cpu},
+    {"sched", "batch_head_after_gap", batch_head_after_gap},
     {0},
 };

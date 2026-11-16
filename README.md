@@ -175,9 +175,13 @@ How it works and what it costs:
   time order: a thread that wakes on one CPU and runs on another has its
   events in different buffers. The parser sorts each file's events by time
   and applies them only up to the newest time every CPU has reached; the
-  rest waits for the next file. In an incomplete file (bytes over
-  `trace_max_bytes`, or one the parser could not read to the end) that rest
-  is dropped instead (`events_discarded`) and pending waits are forgotten.
+  rest waits for the next file. A CPU with no event in the file yet holds
+  everything back (its share of the time may be missing; one silent for two
+  files in a row is let go: `cpu_silent`). In an incomplete file (bytes
+  over `trace_max_bytes`, or one the parser could not read to the end) what
+  is held back is dropped instead (`events_discarded`) and pending waits
+  are forgotten; a truncated file may hold no buffer at all of a quiet CPU,
+  and then none of its scheduling events are used.
   An event still older than one already applied for its thread is ignored,
   its thread's pending wait forgotten, and counted (`out_of_order`; 0 in
   practice). A kernel drop forgets pending waits at the time of its CPU's
@@ -185,10 +189,10 @@ How it works and what it costs:
 - How much trace a system makes varies: an idle Raspberry Pi 4 produces
   about 1 MB of events per second. With the defaults (`trace_interval` =
   `interval` = 10 s, `trace_max_bytes` 4 MiB) most of every interval is
-  over the cap there. Use `trace_interval: 1` with `interval: 1` (a
-  `trace_interval` shorter than `interval` loses intervals:
-  `snapshots_lost`), or raise `trace_max_bytes`. `bytes_dropped` says
-  which.
+  over the cap there, and most intervals give few or no `sched` rows. Use
+  `trace_interval: 1` with `interval: 1` (a `trace_interval` shorter than
+  `interval` loses intervals: `snapshots_lost`), or raise
+  `trace_max_bytes`. `bytes_dropped` and `events_discarded` say which.
 - A thread whose exit was in dropped events would hold its table slot for
   ever. When the table is three-quarters full, threads with no event for two
   intervals that are not ready or running are dropped from it, down to half
@@ -223,8 +227,8 @@ parse), `parse_errors` (files not read to the end, or without a clock rate),
 (past the newest common time of an incomplete file), `reorder_overflow`
 (a file with more events than the sort buffer: expected 0),
 `cpu_time_backwards` (a CPU's events not in time order in the file: expected
-0, the sort relies on it), `cpu_silent` (a CPU with no event for two
-intervals stopped holding the others back), `ready_repeats` (a thread made
+0, the sort relies on it), `cpu_silent` (a CPU with no event for two files
+in a row stopped holding the others back), `ready_repeats` (a thread made
 ready while already ready: rare, at equal timestamps), `watermark_lag_ns`
 (the last file: newest event minus the newest common time, held for the next
 file), `flush_timeouts` (an interval switch that did not see every CPU's

@@ -139,6 +139,11 @@ typedef struct {
 	uint64_t gap_open;                   /* CPUs with a gap waiting for their next event */
 	uint64_t expect; /* CPUs the system has: one with no event yet holds everything back */
 	uint64_t quiet;  /* expected CPUs released for silence, until their next event */
+	/* After a gap each CPU's events resume at its own time: until every CPU
+	 * has resumed, earlier events are incomplete and dropped (the head). */
+	bool head;
+	uint64_t started;                   /* CPUs with an event since the gap */
+	uint64_t first[RTC_SCHED_MAX_CPUS]; /* their first time since the gap */
 	size_t gap_idx[RTC_SCHED_MAX_CPUS];
 	/* counters (the parser thread only) */
 	uint64_t discarded;     /* events past the watermark of an incomplete file */

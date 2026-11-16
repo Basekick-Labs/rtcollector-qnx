@@ -56,8 +56,14 @@ mx=$(echo "$out" | tail -1)
 out=$(SER "cd /tmp; ./rtcollector --config trace-small.yml > /tmp/ts.out 2>&1 & P=\$!; sleep 1; for i in 1 2 3 4 5 6 7 8; do ./rtc_hog -b 1 -s 1 -t 3 & done; sleep 4; kill \$P; sleep 1; grep ^internal_trace /tmp/ts.out | tail -1; grep '^sched' /tmp/ts.out | sed -n 's/.*latency_max_ns=\\([0-9]*\\)i.*/\\1/p' | sort -n | tail -1")
 bd=$(field "$out" bytes_dropped)
 [ "${bd:-0}" -gt 0 ] && ok "byte cap: bytes_dropped=$bd" || bad "byte cap: bytes_dropped=${bd:-?}"
-mx=$(echo "$out" | tail -1)
-[ "${mx:-0}" -lt 500000000 ] && ok "bytes dropped at the cap are not a latency (max ${mx} ns)" || bad "latency across the cap: $mx"
+# Each file is truncated, so what a CPU missing from it held back is dropped
+# (events_discarded); rows that remain must not span the cap.
+mx=$(echo "$out" | grep -E '^[0-9]+$' | tail -1); ed=$(field "$out" events_discarded)
+if [ -z "$mx" ]; then
+	[ "${ed:-0}" -gt 0 ] && ok "byte cap: no rows from truncated files, events_discarded=$ed" || bad "byte cap: no rows and nothing discarded"
+else
+	[ "$mx" -lt 50000000 ] && ok "bytes dropped at the cap are not a latency (max ${mx} ns, events_discarded=${ed:-?})" || bad "latency across the cap: $mx"
+fi
 
 # Thread table bound: 16 threads, more are counted.
 out=$(SER "cd /tmp; ./rtcollector --config trace-threads.yml > /tmp/tt.out 2>&1 & sleep 1; for i in 1 2 3 4 5 6 7 8; do ./rtc_hog -b 1 -s 1 -t 3 & done; sleep 4; slay -f rtcollector; sleep 1; grep ^internal_trace /tmp/tt.out | tail -1")

@@ -414,6 +414,7 @@ void rtc_sched_take(rtc_sched *s, unsigned ncpu, int min_prio, size_t top, rtc_s
 int rtc_sched_batch_init(rtc_sched_batch *b, size_t cap)
 {
 	memset(b, 0, sizeof(*b));
+	b->head = true; /* nothing before the first file */
 	if (cap == 0)
 		cap = 1;
 	b->ev = calloc(cap, sizeof(*b->ev));
@@ -453,6 +454,10 @@ static void cpu_reached(rtc_sched_batch *b, unsigned cpu, uint64_t t)
 	b->known |= bit;
 	b->present |= bit;
 	b->quiet &= ~bit;
+	if (b->head && !(b->started & bit)) {
+		b->first[cpu] = t;
+		b->started |= bit;
+	}
 	if (b->gap_open & bit) {
 		rtc_sched_qev *g = &b->ev[b->gap_idx[cpu]];
 		if (t > g->t_ns)
@@ -486,6 +491,8 @@ static void forget_tracking(rtc_sched_batch *b)
 {
 	b->known = b->present = b->gap_open = 0;
 	memset(b->absent, 0, sizeof(b->absent));
+	b->head = true; /* what follows starts after a gap */
+	b->started = 0;
 }
 
 static rtc_sched_qev *batch_slot(rtc_sched *s, rtc_sched_batch *b)
@@ -640,6 +647,20 @@ void rtc_sched_batch_apply(rtc_sched *s, rtc_sched_batch *b, bool carry, const _
 	b->lag_ns = (w == UINT64_MAX || newest < w) ? 0 : newest - w;
 
 	size_t i = 0;
+	if (b->head) {
+		/* After a gap: the CPUs' events resume at different times, so
+		 * before the latest of those times some CPUs' share is missing
+		 * (a READY whose RUNNING was lost would pair with a later one). */
+		uint64_t h = 0;
+		for (unsigned c = 0; c < RTC_SCHED_MAX_CPUS; c++)
+			if ((b->started & (1ull << c)) && b->first[c] > h)
+				h = b->first[c];
+		while (i < b->n && b->ev[i].t_ns < h)
+			i++;
+		b->discarded += i;
+		if (!held && b->started)
+			b->head = false; /* every CPU has resumed: h is final */
+	}
 	for (; i < b->n && b->ev[i].t_ns < w; i++) {
 		if (stop && (i & 4095) == 4095 && *stop) {
 			b->n = 0;

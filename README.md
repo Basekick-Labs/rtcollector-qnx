@@ -189,12 +189,12 @@ How it works and what it costs:
   practice). A kernel drop forgets pending waits at the time of its CPU's
   next event, so the whole loss lies before the reset.
 - How much trace a system makes varies: an idle Raspberry Pi 4 produces
-  about 1 MB of events per second. With the defaults (`trace_interval` =
-  `interval` = 10 s, `trace_max_bytes` 4 MiB) most of every interval is
-  over the cap there, and intervals give fewer `sched` rows, or none. Use
-  `trace_interval: 1` with `interval: 1` (a `trace_interval` shorter than
-  `interval` loses intervals: `snapshots_lost`), or raise
-  `trace_max_bytes`. `bytes_dropped` and `events_discarded` say which.
+  about 1 MB of events per second, so the defaults (`interval` and
+  `trace_interval` 1 s, `trace_max_bytes` 4 MiB) keep every interval whole
+  there. With a longer `interval`, raise `trace_max_bytes` with it (an
+  interval over the cap gives fewer `sched` rows, or none); a
+  `trace_interval` shorter than `interval` loses intervals
+  (`snapshots_lost`). `bytes_dropped` and `events_discarded` say which.
 - A thread whose exit was in dropped events would hold its table slot for
   ever. When the table is three-quarters full, threads with no event for two
   intervals that are not ready or running are dropped from it, down to half
@@ -259,8 +259,8 @@ its own session (`setsid` on Linux, `on -d` on QNX).
 A minimal configuration, in rtcollector's YAML format:
 
 ```yaml
-interval: 10          # seconds between collection rounds
-flush_interval: 10    # seconds between sends (a full batch is sent sooner)
+interval: 1           # seconds between collection rounds
+flush_interval: 1     # seconds between sends (a full batch is sent sooner)
 buffer_bytes: 1MiB    # fixed buffer, allocated once at startup
 tags:
   site: lab
@@ -273,7 +273,7 @@ outputs:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `interval` | `10` | Seconds between collection rounds |
+| `interval` | `1` | Seconds between collection rounds. rtcollector's default is 10; 1 s keeps the kernel trace's intervals whole (see `trace`). Each output then sends about once a second |
 | `flush_interval` | `interval` | Seconds between sends; a send also happens when a batch is full |
 | `buffer_bytes` | `1MiB` | Size of the buffer between collection and sending, allocated once. When it is full the oldest records are dropped; if an output is copying those at that moment, the newest record is dropped instead. Every drop is counted |
 | `max_record_bytes` | `4096` | Largest record an input may produce (at least 512) |
@@ -283,7 +283,7 @@ outputs:
 | `shutdown_timeout` | `5` | Seconds allowed for the final send on shutdown; the outputs flush in parallel, each within this budget. A request still running then is cut off, and whatever was not sent is counted as dropped |
 | `collect_priority` | `10` | QNX: priority of the collection thread (SCHED_RR, 1–253). Keep it below your real-time threads. Above 63 needs root or `PROCMGR_AID_PRIORITY`; otherwise the thread keeps the inherited priority and `priority_fallback` is counted |
 | `send_priority` | `9` | QNX: priority of the sender threads, one per output, so a destination that hangs never delays another. With `--once` everything runs on the main thread and neither priority applies |
-| `processes_every` | `6` | Rounds between process scans (a scan costs about 50 µs per process) |
+| `processes_every` | `60` | Rounds between process scans (a scan costs about 50 µs per process): once a minute at the default `interval` |
 | `max_processes` | `4096` | A scan stops here; `processes_overflow` is counted |
 | `rmgr_path` | `/dev/rtcollector` | Path of the device (input `rmgr`) |
 | `rmgr_mode` | `0660` | Its permissions, octal. `0666` lets any user publish (and flood) |

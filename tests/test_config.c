@@ -180,7 +180,10 @@ static void qnx_keys(void)
 	 * the first TLS handshake. */
 	CHECK(load(&c, "outputs:\n  - arc: {url: 'https://x', ca_file: /nonexistent/ca.pem}\n") == -1);
 	CHECK(load(&c, "outputs: [stdout]\n") == 0);
-	CHECK(c.collect_priority == 10 && c.send_priority == 9 && c.processes_every == 6);
+	CHECK(c.collect_priority == 10 && c.send_priority == 9 && c.processes_every == 60);
+	/* Defaults: a round a second (the trace input needs it), a send a
+	 * round, a trace interval a round, a process scan a minute. */
+	CHECK(c.interval_s == 1 && c.flush_interval_s == 1 && c.trace_interval_s == 1);
 }
 
 /* The trace keys' defaults never refuse a configuration that does not use the

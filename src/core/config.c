@@ -20,12 +20,12 @@
 void rtc_config_defaults(rtc_config *c)
 {
 	memset(c, 0, sizeof(*c));
-	c->interval_s = 10;
+	c->interval_s = 1;        /* the kernel trace needs it: ~1 MB/s on an idle Pi 4 */
 	c->flush_interval_s = -1; /* = interval */
 	c->shutdown_timeout_s = 5;
 	c->collect_priority = 10;
 	c->send_priority = 9;
-	c->processes_every = 6;
+	c->processes_every = 60; /* a process scan a minute at the default interval */
 	c->max_processes = 4096;
 	snprintf(c->rmgr_path, sizeof(c->rmgr_path), "/dev/rtcollector");
 	c->rmgr_mode = 0660;

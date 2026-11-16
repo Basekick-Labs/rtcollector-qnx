@@ -1,6 +1,6 @@
 /* Configuration: rtcollector's YAML shape.
  *
- *   interval: 10            seconds between collection rounds
+ *   interval: 1             seconds between collection rounds
  *   flush_interval: =interval  seconds between sends (also sends when a batch fills)
  *   buffer_bytes: 1MiB      ring size, allocated once (rounded to a power of two)
  *   max_record_bytes: 4096  largest record an input may produce (min 512)
@@ -13,7 +13,7 @@
  *   shutdown_timeout: 5     seconds for the final flush
  *   collect_priority: 10    QNX: collection thread priority (SCHED_RR, 1-253)
  *   send_priority: 9        QNX: sender thread priority
- *   processes_every: 6      rounds between process scans
+ *   processes_every: 60     rounds between process scans
  *   max_processes: 4096     a scan stops here (overflow counted)
  *   rmgr_path: /dev/rtcollector   rmgr input: where programs write line protocol
  *   rmgr_mode: 0660         its permissions (octal); rmgr_group: 0 its group

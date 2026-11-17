@@ -14,12 +14,13 @@ command -v "$READELF" >/dev/null || { echo "qnx-check: $READELF not found"; exit
 dyn=$("$READELF" -d "$BIN")
 syms=$("$READELF" -s --wide "$BIN")
 [ -n "$dyn" ] && [ -n "$syms" ] || { echo "qnx-check: $READELF printed nothing for $BIN"; exit 1; }
-# The symbol test reads .symtab: run it on the unstripped binary.
-printf '%s\n' "$syms" | grep -q "Symbol table '.symtab'" ||
+# The symbol test reads .symtab: run it on the unstripped binary. (Here-strings,
+# not pipes: under pipefail a `grep -q` that stops early fails the writer.)
+grep -q "Symbol table '.symtab'" <<<"$syms" ||
 	{ echo "qnx-check: $BIN has no .symtab (stripped?): check the unstripped binary"; exit 1; }
 
 fail=0
-needed=$(printf '%s\n' "$dyn" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+needed=$(sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' <<<"$dyn")
 [ -n "$needed" ] || { echo "qnx-check: no NEEDED entries in $BIN"; exit 1; }
 for lib in $needed; do
 	case "$ALLOWED" in
@@ -32,12 +33,11 @@ for lib in $needed; do
 done
 
 # libtraceparser's own functions, defined in the binary (not UND).
-if printf '%s\n' "$syms" |
-	awk '$7 != "UND" && $8 ~ /^traceparser(_(init|destroy|cs|cs_range|get_info|one_event|debug))?$/' |
-	grep -q .; then
+linked=$(awk '$7 != "UND" && $8 ~ /^traceparser(_(init|destroy|cs|cs_range|get_info|one_event|debug))?$/' <<<"$syms")
+if [ -n "$linked" ]; then
 	echo "libtraceparser is linked into $BIN"
 	fail=1
 fi
 
-[ $fail = 0 ] && echo "qnx-check $BIN: ok ($(printf '%s' "$needed" | tr '\n' ' '))"
+[ $fail = 0 ] && echo "qnx-check $BIN: ok ($(tr '\n' ' ' <<<"$needed"))"
 exit $fail

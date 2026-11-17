@@ -1,0 +1,22 @@
+# rtcollector on a QNX 8.0 target (tested on a Raspberry Pi 4), sending to Arc.
+# Every key and its default: README, "Running". Run as root: the kernel trace
+# and the process scan need it.
+
+# interval: 1                # seconds between rounds (the default)
+
+inputs:
+  - cpu                      # per-CPU usage, from procnto's idle threads
+  - mem
+  - processes                # counts; threads too when run as root
+  - trace                    # scheduling latency per thread, interrupts (kernel trace)
+  - rmgr                     # /dev/rtcollector: programs publish line protocol
+
+# Who may write to /dev/rtcollector: 0660 and group 0 by default (root).
+# rmgr_mode: 0666            # any local program (and any local user) may publish
+
+outputs:
+  - arc:
+      # Your Arc server, by IP: the QNX image does not resolve .local names.
+      url: http://192.168.1.10:8000
+      database: qnx
+      # token: ...           # or set RTC_ARC_TOKEN in the environment

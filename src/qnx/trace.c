@@ -105,6 +105,67 @@ static bool load_tracelog(void)
 	return true; /* never closed: the input lives as long as the process */
 }
 
+/* libtraceparser is loaded the same way, so the released binary carries no
+ * QNX code: the QNX 8.0 quickstart image does not ship it, and users copy
+ * libtraceparser.so.1 from their own SDP. The types come from the header. */
+static struct {
+	__typeof__(traceparser_init) *init;
+	__typeof__(traceparser_destroy) *destroy;
+	__typeof__(traceparser_get_info) *get_info;
+	__typeof__(traceparser_cs) *cs;
+	__typeof__(traceparser_cs_range) *cs_range;
+	__typeof__(traceparser) *parse;
+} tp;
+#define traceparser_init     tp.init
+#define traceparser_destroy  tp.destroy
+#define traceparser_get_info tp.get_info
+#define traceparser_cs       tp.cs
+#define traceparser_cs_range tp.cs_range
+#define traceparser          tp.parse
+
+static const char traceparser_lib[] = "libtraceparser.so.1";
+
+/* The library path first, then the directory of the executable. */
+static void *open_traceparser(void)
+{
+	void *h = dlopen(traceparser_lib, RTLD_NOW);
+	if (h)
+		return h;
+	char exe[256] = "";
+	FILE *f = fopen("/proc/self/exefile", "r");
+	if (f) {
+		if (!fgets(exe, sizeof(exe), f))
+			exe[0] = '\0';
+		fclose(f);
+	}
+	char *slash = strrchr(exe, '/');
+	if (!slash)
+		return NULL;
+	slash[1] = '\0';
+	char path[sizeof(exe) + sizeof(traceparser_lib)];
+	snprintf(path, sizeof(path), "%s%s", exe, traceparser_lib);
+	return dlopen(path, RTLD_NOW);
+}
+
+static bool load_traceparser(void)
+{
+	void *h = open_traceparser();
+	if (!h)
+		return false;
+	*(void **)&tp.init = dlsym(h, "traceparser_init");
+	*(void **)&tp.destroy = dlsym(h, "traceparser_destroy");
+	*(void **)&tp.get_info = dlsym(h, "traceparser_get_info");
+	*(void **)&tp.cs = dlsym(h, "traceparser_cs");
+	*(void **)&tp.cs_range = dlsym(h, "traceparser_cs_range");
+	*(void **)&tp.parse = dlsym(h, "traceparser");
+	if (!tp.init || !tp.destroy || !tp.get_info || !tp.cs || !tp.cs_range || !tp.parse) {
+		memset(&tp, 0, sizeof(tp));
+		dlclose(h);
+		return false;
+	}
+	return true; /* never closed, like libtracelog */
+}
+
 #define C          "trace"
 #define HDR_MAX    (64 * 1024)
 #define QUEUE      2 /* finished files waiting to be parsed */
@@ -819,8 +880,20 @@ static void start(rtc_collector *c)
 	if (!st.batch.ev)
 		return; /* no sort buffer (init): unavailable, counted */
 	if (!load_tracelog()) {
+		const char *e = dlerror();
 		RTC_WARN(C, "cannot load %s (%s); the collector runs without kernel tracing", tracelog_lib,
-		         dlerror());
+		         e ? e : "a function is missing");
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&c->counters.trace_unavailable, 1);
+		return;
+	}
+	if (!load_traceparser()) {
+		const char *e = dlerror();
+		RTC_WARN(C,
+		         "cannot load %s (%s); copy it from the QNX SDP ($QNX_TARGET/<arch>/usr/lib) to "
+		         "/usr/lib on the target or next to rtcollector; the collector runs without kernel "
+		         "tracing",
+		         traceparser_lib, e ? e : "a function is missing");
 		rtc_counter_set(&st.k.unavailable, 1);
 		rtc_counter_set(&c->counters.trace_unavailable, 1);
 		return;

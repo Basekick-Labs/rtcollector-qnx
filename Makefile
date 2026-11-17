@@ -15,7 +15,10 @@ SHELL      := /bin/bash
 CC      ?= cc
 BUILD   ?= build
 VERSION ?= 0.1.0-dev
-BUILD_EPOCH := $(shell date +%s)
+# Release builds pass the commit time; otherwise now (evaluated once).
+ifeq ($(origin BUILD_EPOCH),undefined)
+  BUILD_EPOCH := $(shell date +%s)
+endif
 
 UNAME := $(shell uname -s)
 PLATFORM ?= host
@@ -37,12 +40,14 @@ ifeq ($(PLATFORM),qnx)
   DEPFLAGS = -Wp,-MMD,$(@:.o=.d),-MT,$@,-MP
   # SDP 8.0 ships libcurl (shared, on the image) and libzstd (static here: the
   # mkqnximage image has no libzstd.so). libsocket: the MQTT output. libyaml is
-  # vendored. pthreads are in libc on QNX: no -lpthread.
+  # vendored. pthreads are in libc on QNX: no -lpthread. libtracelog and
+  # libtraceparser are loaded at run time (src/qnx/trace.c): the binary
+  # carries no QNX library, and runs without them (no trace input).
   DEPS_CFLAGS := -I$(QNX_TARGET)/usr/include/zstd -Ithird_party/libyaml/include -DYAML_DECLARE_STATIC -DRTC_QNX=1 \
                  -D_QNX_SOURCE
   YAML_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(wildcard third_party/libyaml/src/*.c))
   PLATFORM_SRC := $(wildcard src/qnx/*.c)
-  QNX_LIBS := -lcurl -lsocket -Wl,-Bstatic -lzstd -ltraceparser -Wl,-Bdynamic -lm
+  QNX_LIBS := -lcurl -lsocket -Wl,-Bstatic -lzstd -Wl,-Bdynamic -lm
 endif
 
 CFLAGS  ?= -O2 -g
@@ -127,11 +132,25 @@ lint:
 	cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
 	  --suppress=missingIncludeSystem --inline-suppr -I src src tests
 
+# The version is compiled into main.o: rebuild it when VERSION changes.
+$(BUILD)/version.stamp: FORCE
+	@mkdir -p $(BUILD)
+	@echo '$(VERSION)' | cmp -s - $@ || echo '$(VERSION)' > $@
+$(BUILD)/src/main.o: $(BUILD)/version.stamp
+.PHONY: FORCE
+FORCE:
+
 ARCH ?= x86_64
 qnx:
 	@test -n "$(QNX_TARGET)" || { echo "source qnxsdp-env.sh first"; exit 1; }
 	$(MAKE) PLATFORM=qnx BUILD=build-qnx-$(ARCH) CC="qcc -Vgcc_nto$(ARCH)" \
 	  build-qnx-$(ARCH)/rtcollector build-qnx-$(ARCH)/rtc_writer build-qnx-$(ARCH)/rtc_hog
+
+# The QNX binary needs only the image's own libraries and defines no
+# libtraceparser symbol (it must not carry QNX code: see trace.c).
+qnx-check:
+	@test -n "$(QNX_TARGET)" || { echo "source qnxsdp-env.sh first"; exit 1; }
+	scripts/qnx-check.sh build-qnx-$(ARCH)/rtcollector nto$(ARCH)-readelf
 
 $(BUILD)/rtc_writer: tests/qnx/rtc_writer.c include/rtc_publish.h
 	$(CC) $(CFLAGS) $< -o $@

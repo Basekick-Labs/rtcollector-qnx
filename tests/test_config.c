@@ -212,7 +212,19 @@ static void trace_defaults_follow_interval(void)
 	CHECK(load(&c, "trace_max_bytes: 65MiB\noutputs: [stdout]\n") == -1);
 }
 
+/* The example shipped with the release loads, with every input it names. */
+static void shipped_example_loads(void)
+{
+	rtc_config c;
+	rtc_config_defaults(&c);
+	CHECK(rtc_config_load(&c, "examples/rtcollector.yml") == 0);
+	CHECK(c.arc.enabled && c.interval_s == 1);
+	/* The QNX inputs are skipped (with a warning) on the host build. */
+	CHECK(c.ninputs >= 1);
+}
+
 const t_case config_cases[] = {
+    {"config", "shipped_example_loads", shipped_example_loads},
     {"config", "qnx_keys", qnx_keys},
     {"config", "trace_defaults_follow_interval", trace_defaults_follow_interval},
     {"config", "small_buffer_clamps_default_batch", small_buffer_clamps_default_batch},

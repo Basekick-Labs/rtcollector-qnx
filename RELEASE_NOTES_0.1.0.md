@@ -32,16 +32,16 @@ from a blank SD card to data in Arc on a Raspberry Pi 4.
 
 ## Requirements on the target
 
-`libcurl.so.12`, `libsocket.so.4`, `libm.so.3`, `libc.so.6` (on the QNX 8.0
-images). The `trace` input also needs `libtracelog.so.1` (on the images) and
+`libcurl.so.12`, `libsocket.so.4`, `libm.so.3`, `libc.so.6`, `libgcc_s.so.1`
+(on the QNX 8.0 images). The `trace` input also needs `libtracelog.so.1` (on the images) and
 `libtraceparser.so.1`, which you copy from your QNX SDP 8.0 to `/usr/lib`.
 Without them the other inputs run and `trace` reports itself unavailable.
 
 ## Licence
 
 The source is under the Apache License 2.0. The binaries are built with the
-QNX SDP 8.0 and contain no QNX code; the QNX libraries they run with are
-licensed to you by QNX under their own terms. rtcollector-qnx is free for
-non-commercial use and makes no claim to commercial use of QNX software. QNX
-is a trademark of BlackBerry Limited; this project is not affiliated with or
-endorsed by BlackBerry or QNX. See NOTICE.
+QNX SDP 8.0 under QNX's non-commercial licence (QNX Everywhere); QNX software
+on your target is licensed to you by QNX under its own terms. Apart from the
+toolchain's C start-up code and the SDP's build of zstd, the binaries contain
+no QNX code. QNX is a trademark of BlackBerry Limited; this project is not
+affiliated with or endorsed by BlackBerry or QNX. See NOTICE.

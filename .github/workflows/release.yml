@@ -2,8 +2,9 @@ name: Release
 
 # Push release/X.Y.Z (cut from main) to build vX.Y.Z and create it as a
 # DRAFT release; a maintainer reviews and publishes it (docs/releasing.md).
-# The QNX build runs on Basekick's build host, reached over Tailscale; the
-# job that holds those secrets waits for a reviewer (environment `release`).
+# The QNX build runs on Basekick's build host, reached over Tailscale. Its
+# secrets are environment secrets of `release`, which needs a reviewer's
+# approval and deploys only from release/* (docs/releasing.md).
 on:
   push:
     branches:
@@ -38,9 +39,18 @@ jobs:
           VERSION="${REF_NAME#release/}"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::branch must be release/X.Y.Z, got $REF_NAME"; exit 1; }
           test -f "RELEASE_NOTES_${VERSION}.md" || { echo "::error::RELEASE_NOTES_${VERSION}.md is missing"; exit 1; }
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
-            echo "::error::tag v${VERSION} already exists"; exit 1
-          fi
+          tag_status=$(gh api -i "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}" 2>/dev/null | head -1 || true)
+          case "$tag_status" in
+            *" 404"*) ;;
+            *" 200"*) echo "::error::tag v${VERSION} already exists"; exit 1 ;;
+            *) echo "::error::cannot check tag v${VERSION}: ${tag_status:-no answer}"; exit 1 ;;
+          esac
+          # Releases are cut from main: the commit must be on it.
+          on_main=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...main" -q .status)
+          case "$on_main" in
+            ahead|identical) ;;
+            *) echo "::error::${GITHUB_SHA} is not on main (${on_main})"; exit 1 ;;
+          esac
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           echo "Building v$VERSION from $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
@@ -68,6 +78,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release
+    # One build at a time on the build host, whatever the version.
+    concurrency:
+      group: rtc-release-build
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
@@ -86,10 +100,10 @@ jobs:
           KNOWN_HOSTS: ${{ secrets.RELEASE_BUILD_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
+          [ -n "$SSH_KEY" ] && [ -n "$KNOWN_HOSTS" ] || { echo "::error::release build secrets missing"; exit 1; }
           umask 077
           printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/key"
           printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
-          test -s "$RUNNER_TEMP/key" && test -s "$RUNNER_TEMP/known_hosts"
       - name: Build on the build host
         env:
           HOST: ${{ secrets.RELEASE_BUILD_HOST }}
@@ -99,7 +113,6 @@ jobs:
         run: |
           set -euo pipefail
           for _ in 1 2 3 4 5 6; do getent hosts "$HOST" >/dev/null && break; sleep 5; done
-          mkdir out
           # The source goes in on stdin; a tar of the packages comes back on
           # stdout (capped). The host's log is shown only if the build fails.
           set +e
@@ -134,7 +147,9 @@ jobs:
             d=$(mktemp -d); tar -xzf "$t" -C "$d"
             b="$d/rtcollector-$VERSION-qnx8.0-$a/rtcollector"
             file "$b" | tee /dev/stderr | grep -q "$( [ $a = aarch64le ] && echo 'ARM aarch64' || echo 'x86-64')"
-            strings "$b" | grep -qxF "$VERSION" || { echo "::error::$b does not carry version $VERSION"; exit 1; }
+            # Here-strings, not pipes: under pipefail a grep -q that matches early
+            # kills the writer and reads as a failure.
+            grep -qxF "$VERSION" <<<"$(strings "$b")" || { echo "::error::$b does not carry version $VERSION"; exit 1; }
             rm -rf "$d"
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -142,7 +157,9 @@ jobs:
           name: packages
           path: |
             dist/*.tar.gz
+            dist/MANIFEST.sha256
           retention-days: 7
+          overwrite: true
 
   draft-release:
     name: Draft release
@@ -166,6 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
+          sha256sum -c MANIFEST.sha256
           sha256sum -- *.tar.gz > SHA256SUMS
           {
             cat "../RELEASE_NOTES_${VERSION}.md"
@@ -174,12 +192,17 @@ jobs:
             echo
             echo "Built from commit \`$SHA\` with the QNX SDP 8.0 on Basekick's build host."
             echo "Getting started: [docs/getting-started.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/getting-started.md)."
-            echo "Free for non-commercial use; QNX libraries on your target are under QNX's terms (see NOTICE)."
+            echo "Source: Apache-2.0. The binaries are built with the QNX SDP 8.0 under QNX's non-commercial licence (QNX Everywhere); QNX software on your target is licensed to you by QNX under its own terms (see NOTICE)."
             echo
             echo '```'
             cat SHA256SUMS
             echo '```'
           } > notes.md
+          # The tag must still not exist (it may have been made since prepare):
+          # an existing tag would win over --target.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::tag v$VERSION exists now; not creating the release"; exit 1
+          fi
           # Re-runs replace the draft.
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             if [ "$(gh release view "v$VERSION" --json isDraft -q .isDraft)" = true ]; then

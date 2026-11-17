@@ -8,18 +8,17 @@ Release binaries
 ----------------
 
 The release binaries are built with the QNX Software Development Platform
-8.0, available free of charge for non-commercial use through QNX Everywhere.
-They contain no QNX code: at run time they use the QNX libraries present on
-the target (libc, libm, libsocket, libcurl, libtracelog) and, for the trace
-input, libtraceparser, which you copy from your own QNX SDP. Those libraries
-are licensed to you by QNX under their own terms; using rtcollector-qnx on
-QNX does not give you any right to QNX software.
-
-rtcollector-qnx makes no claim to commercial use of QNX software.
+8.0 under QNX's non-commercial licence (QNX Everywhere). Apart from the C
+start-up code the QNX toolchain links into every program and the SDP's build
+of zstd (below), they contain no QNX code: at run time they use the QNX
+libraries present on the target (libc, libm, libsocket, libcurl, libgcc_s,
+libtracelog) and, for the trace input, libtraceparser, which you copy from
+your own QNX SDP. QNX software on your target is licensed to you by QNX
+under its own terms; rtcollector-qnx gives you no right to it.
 
 The binaries include, statically linked:
 
-- zstd 1.5.0 (BSD licence; licenses/zstd.txt)
+- zstd 1.5.0, the QNX SDP's build (BSD licence; licenses/zstd.txt)
 - libyaml 0.2.5 (MIT licence; licenses/libyaml.txt)
 
 Trademarks

@@ -36,18 +36,20 @@ https://github.com/Basekick-Labs/rtcollector-qnx
 
 Getting started: https://github.com/Basekick-Labs/rtcollector-qnx/blob/v$VERSION/docs/getting-started.md
 
-On the target the binary needs libcurl.so.12, libsocket.so.4, libm.so.3 and
-libc.so.6 (on the QNX 8.0 images). The trace input also needs
-libtracelog.so.1 (on the images) and libtraceparser.so.1: copy it from your
-QNX SDP 8.0 (\$QNX_TARGET/$ARCH/usr/lib/libtraceparser.so.1) to /usr/lib.
+On the target the binary needs libcurl.so.12, libsocket.so.4, libm.so.3,
+libc.so.6 and libgcc_s.so.1 (on the QNX 8.0 images). The trace input also
+needs libtracelog.so.1 (on the images) and libtraceparser.so.1: copy it from
+your QNX SDP 8.0 (\$QNX_TARGET/$ARCH/usr/lib/libtraceparser.so.1) to /usr/lib.
 
-Free for non-commercial use under the terms of the QNX libraries it runs
-with; see NOTICE.
+Source: Apache-2.0. These binaries are built with the QNX SDP 8.0 under
+QNX's non-commercial licence (QNX Everywhere); QNX software on your target
+is licensed to you by QNX under its own terms. See NOTICE.
 EOF
 
-# Nothing from the build host in the shipped files.
+# Nothing from the build host in the shipped files. (A here-string, not a
+# pipe: under pipefail an early match would kill strings and read as clean.)
 for f in "$P/rtcollector" "$P/rtc_writer"; do
-	if strings "$f" | grep -qE '/home/|/tmp/tmp|/opt/qnx800|rtcbuild'; then
+	if grep -qE '/home/|/tmp/tmp|/opt/qnx' <<<"$(strings "$f")"; then
 		echo "package: $f contains a build-host path"
 		exit 1
 	fi

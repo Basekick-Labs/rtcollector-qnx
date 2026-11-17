@@ -100,8 +100,19 @@ computer:
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
 tar -xzf rtcollector-<version>-qnx8.0-aarch64le.tar.gz
-scp -r rtcollector-<version>-qnx8.0-aarch64le qnxuser@qnxpi.local:/data/home/qnxuser/rtc
+scp -r rtcollector-<version>-qnx8.0-aarch64le qnxuser@qnxpi.local:/tmp/
 ```
+
+On the Pi, as root, put it in a directory only root can change (it runs as
+root, at boot too, so `qnxuser`'s home is not the place):
+
+```sh
+rm -rf /data/rtc && mv /tmp/rtcollector-<version>-qnx8.0-aarch64le /data/rtc
+chown -R root:root /data/rtc && chmod -R go-w /data/rtc
+```
+
+(For an upgrade, the same two commands replace it; keep your
+`rtcollector.yml` aside first.)
 
 The trace input needs `libtraceparser.so.1`, which the image does not have.
 Copy it from your SDP (`~/qnx800` by default):
@@ -123,14 +134,13 @@ but only in a directory and file owned by root that nobody else can write;
 
 ## 6. Configure and run
 
-Edit `/data/home/qnxuser/rtc/rtcollector.yml` on the Pi: put your computer's
-IP in `url` (port 8000). The token goes in the environment rather than the
-file:
+As root on the Pi, edit `/data/rtc/rtcollector.yml`: put your computer's IP
+in `url` (port 8000). Keep the token out of it, in a file only root can read:
 
 ```sh
-cd /data/home/qnxuser/rtc
-export RTC_ARC_TOKEN=<the admin token>
-./rtcollector-start.sh
+echo 'export RTC_ARC_TOKEN=<the admin token>' > /data/rtc/token.env
+chmod 600 /data/rtc/token.env
+. /data/rtc/token.env && /data/rtc/rtcollector-start.sh
 ```
 
 It logs to the terminal and sends every second. Stop it with Ctrl-C (or
@@ -172,7 +182,7 @@ root, add before its last lines (`echo Process count...` and `exit 0`):
 
 ```sh
 if [ -f /boot/rtcollector_on ]; then
-  RTC_ARC_TOKEN=<the admin token> /data/home/qnxuser/rtc/rtcollector-start.sh > /data/var/log/rtcollector.log 2>&1 &
+  ( . /data/rtc/token.env && /data/rtc/rtcollector-start.sh ) > /data/var/log/rtcollector.log 2>&1 &
 fi
 ```
 
@@ -190,7 +200,8 @@ it off.
 - The Pi drops off Wi-Fi: on a network with several access points, it may
   roam between them; the log is `slog2info | grep CTRL-EVENT`.
 
-rtcollector-qnx is free for non-commercial use. The QNX libraries it runs with
-are licensed to you by QNX under their own terms (see NOTICE). QNX is a
+The source is Apache-2.0. The release binaries are built with the QNX SDP 8.0
+under QNX's non-commercial licence (QNX Everywhere), and QNX software on your
+Pi is licensed to you by QNX under its own terms (see NOTICE). QNX is a
 trademark of BlackBerry Limited; this project is not affiliated with or
 endorsed by BlackBerry, QNX or Raspberry Pi Ltd.

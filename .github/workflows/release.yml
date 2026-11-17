@@ -183,13 +183,32 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum -c MANIFEST.sha256
-          sha256sum -- *.tar.gz > SHA256SUMS
+          # The binaries on their own too, with the notices they must ship with
+          # (unpacked elsewhere: the package directory has the binary's name).
+          x=$(mktemp -d)
+          for a in aarch64le x86_64; do
+            n="rtcollector-$VERSION-qnx8.0-$a"
+            tar -xzf "$n.tar.gz" -C "$x" "$n/rtcollector"
+            cp "$x/$n/rtcollector" "$n"
+          done
+          n="rtcollector-$VERSION-qnx8.0-aarch64le"
+          tar -xzf "$n.tar.gz" -C "$x" "$n/NOTICE" "$n/licenses"
+          {
+            cat "$x/$n/NOTICE"
+            printf '\n\n==== zstd licence (licenses/zstd.txt) ====\n\n'; cat "$x/$n/licenses/zstd.txt"
+            printf '\n\n==== libyaml licence (licenses/libyaml.txt) ====\n\n'; cat "$x/$n/licenses/libyaml.txt"
+          } > NOTICE.txt
+          rm -rf "$x"
+          test -f "rtcollector-$VERSION-qnx8.0-aarch64le" && test -f "rtcollector-$VERSION-qnx8.0-x86_64"
+          ASSETS=(rtcollector-"$VERSION"-qnx8.0-*.tar.gz "rtcollector-$VERSION-qnx8.0-aarch64le" "rtcollector-$VERSION-qnx8.0-x86_64" NOTICE.txt)
+          sha256sum -- "${ASSETS[@]}" > SHA256SUMS
           {
             cat "../RELEASE_NOTES_${VERSION}.md"
             echo
             echo "---"
             echo
             echo "Built from commit \`$SHA\` with the QNX SDP 8.0 on Basekick's build host."
+            echo "The binaries are also attached on their own (\`rtcollector-$VERSION-qnx8.0-<arch>\`, with \`NOTICE.txt\`); the tarballs add the start script, example config and header."
             echo "Getting started: [docs/getting-started.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/getting-started.md)."
             echo "Source: Apache-2.0. The binaries are built with the QNX SDP 8.0 under QNX's non-commercial licence (QNX Everywhere); QNX software on your target is licensed to you by QNX under its own terms (see NOTICE)."
             echo
@@ -211,5 +230,5 @@ jobs:
             fi
           fi
           gh release create "v$VERSION" --draft --target "$SHA" --title "v$VERSION" \
-            --notes-file notes.md -- *.tar.gz SHA256SUMS
+            --notes-file notes.md -- "${ASSETS[@]}" SHA256SUMS
           echo "Draft v$VERSION created at $SHA: review and publish it." >> "$GITHUB_STEP_SUMMARY"

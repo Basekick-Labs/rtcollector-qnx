@@ -94,8 +94,10 @@ allow port 8000.
 
 Download the release for the Pi from
 [the releases page](https://github.com/Basekick-Labs/rtcollector-qnx/releases):
-`rtcollector-<version>-qnx8.0-aarch64le.tar.gz` and `SHA256SUMS`. On your
-computer:
+`rtcollector-<version>-qnx8.0-aarch64le.tar.gz` and `SHA256SUMS`. (The bare
+binary, `rtcollector-<version>-qnx8.0-aarch64le`, is there too if you only
+want the program; the tarball adds `rtcollector-start.sh`, the example
+config and the header used below.) On your computer:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS

@@ -22,9 +22,12 @@ HTTP=$!
 trap 'kill $HTTP 2>/dev/null || true' EXIT
 for _ in 1 2 3 4 5 6 7 8 9 10; do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/trace.yml" 2>/dev/null && break; sleep 0.3; done
 # A copy that looks for a libtracelog that is not there: an image without it.
+# libtraceparser is loaded at run time: deploy it next to the binary, as the
+# getting-started guide tells users to.
+cp "$QNX_TARGET/x86_64/usr/lib/libtraceparser.so.1" "$B/" || { echo "no libtraceparser.so.1 in the SDP"; exit 2; }
 python3 -I -c 'import sys; d=open(sys.argv[1],"rb").read(); assert d.count(b"libtracelog.so.1\0")==1; open(sys.argv[2],"wb").write(d.replace(b"libtracelog.so.1\0", b"libtracelog.so.9\0"))' "$B/rtcollector" "$B/rtcollector-nolib" || { echo "cannot patch the library name"; exit 2; }
 want=$(cksum <"$B/rtcollector" | awk '{print $1}')
-got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-threads.yml trace-slow.yml trace-rmgr.yml trace-big.yml trace-default.yml; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
+got=$(SER "cd /tmp && slay -f -s SIGKILL rtcollector >/dev/null 2>&1; rm -f rtcollector && for f in rtcollector rtcollector-nolib rtc_writer rtc_hog trace.yml trace-small.yml trace-threads.yml trace-slow.yml trace-rmgr.yml trace-big.yml trace-default.yml libtraceparser.so.1; do curl -fsS -O http://10.0.2.2:$PORT/\$f || exit 1; done; chmod 755 rtcollector rtcollector-nolib rtc_writer rtc_hog; cksum < rtcollector" | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && ok "deployed (cksum $want)" || { bad "deploy: cksum $got vs $want"; exit 1; }
 
 # Known workload on CPU 1: prio-30 hog 5 ms busy / 5 ms idle, prio-40 thread

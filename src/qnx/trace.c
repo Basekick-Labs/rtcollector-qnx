@@ -43,6 +43,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -50,6 +51,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/neutrino.h>
+#include <sys/stat.h>
 #include <sys/syspage.h>
 #include <sys/trace.h>
 #include <sys/tracelog.h>
@@ -103,6 +105,105 @@ static bool load_tracelog(void)
 		return false;
 	}
 	return true; /* never closed: the input lives as long as the process */
+}
+
+/* libtraceparser is loaded the same way, so the released binary carries no
+ * QNX code: the QNX 8.0 quickstart image does not ship it, and users copy
+ * libtraceparser.so.1 from their own SDP. The types come from the header. */
+static struct {
+	__typeof__(traceparser_init) *init;
+	__typeof__(traceparser_destroy) *destroy;
+	__typeof__(traceparser_get_info) *get_info;
+	__typeof__(traceparser_cs) *cs;
+	__typeof__(traceparser_cs_range) *cs_range;
+	__typeof__(traceparser) *parse;
+} tp;
+#define traceparser_init     tp.init
+#define traceparser_destroy  tp.destroy
+#define traceparser_get_info tp.get_info
+#define traceparser_cs       tp.cs
+#define traceparser_cs_range tp.cs_range
+#define traceparser          tp.parse
+
+static const char traceparser_lib[] = "libtraceparser.so.1";
+
+/* Why the fallback was not used, for the warning (NULL: not tried). */
+static const char *traceparser_skip;
+
+/* A directory or file we may load code from as this user: owned by root or
+ * by us, and writable by no one else. A library next to a binary in /tmp
+ * would let any local user run code as root. */
+static bool trusted(const char *p)
+{
+	struct stat sb;
+	if (stat(p, &sb) != 0)
+		return false;
+	if (sb.st_uid != 0 && sb.st_uid != geteuid())
+		return false;
+	return (sb.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+/* The library path first, then the directory of the executable: dladdr() on
+ * one of our own functions names the file it came from (a non-root process
+ * may not read /proc/self/exefile on QNX 8, so that is only the second try).
+ * dli_fname can be relative to the start directory: nothing in the collector
+ * calls chdir(), and nothing may. */
+static void *open_traceparser(void)
+{
+	traceparser_skip = NULL;
+	void *h = dlopen(traceparser_lib, RTLD_NOW);
+	if (h)
+		return h;
+	char exe[PATH_MAX] = "";
+	Dl_info di;
+	if (dladdr((void *)(uintptr_t)open_traceparser, &di) != 0 && di.dli_fname &&
+	    (size_t)snprintf(exe, sizeof(exe), "%s", di.dli_fname) >= sizeof(exe))
+		exe[0] = '\0'; /* truncated: a parent directory, not ours */
+	if (!strchr(exe, '/')) {
+		exe[0] = '\0';
+		FILE *f = fopen("/proc/self/exefile", "r");
+		if (f) {
+			size_t n = fread(exe, 1, sizeof(exe) - 1, f);
+			exe[n] = '\0';
+			if (n == sizeof(exe) - 1 || ferror(f))
+				exe[0] = '\0';
+			fclose(f);
+			exe[strcspn(exe, "\n")] = '\0';
+		}
+	}
+	char *slash = strrchr(exe, '/');
+	if (!slash)
+		return NULL;
+	slash[1] = '\0';
+	char path[PATH_MAX + sizeof(traceparser_lib)];
+	snprintf(path, sizeof(path), "%s%s", exe, traceparser_lib);
+	if (access(path, F_OK) != 0)
+		return NULL; /* not there either: the first dlopen's error stands */
+	if (!trusted(exe) || !trusted(path)) {
+		traceparser_skip = "the copy next to rtcollector is in a directory, or is a file, that "
+		                   "another user can write (use /usr/lib or a root-owned directory)";
+		return NULL;
+	}
+	return dlopen(path, RTLD_NOW);
+}
+
+static bool load_traceparser(void)
+{
+	void *h = open_traceparser();
+	if (!h)
+		return false;
+	*(void **)&tp.init = dlsym(h, "traceparser_init");
+	*(void **)&tp.destroy = dlsym(h, "traceparser_destroy");
+	*(void **)&tp.get_info = dlsym(h, "traceparser_get_info");
+	*(void **)&tp.cs = dlsym(h, "traceparser_cs");
+	*(void **)&tp.cs_range = dlsym(h, "traceparser_cs_range");
+	*(void **)&tp.parse = dlsym(h, "traceparser");
+	if (!tp.init || !tp.destroy || !tp.get_info || !tp.cs || !tp.cs_range || !tp.parse) {
+		memset(&tp, 0, sizeof(tp));
+		dlclose(h);
+		return false;
+	}
+	return true; /* never closed, like libtracelog */
 }
 
 #define C          "trace"
@@ -819,8 +920,19 @@ static void start(rtc_collector *c)
 	if (!st.batch.ev)
 		return; /* no sort buffer (init): unavailable, counted */
 	if (!load_tracelog()) {
+		const char *e = dlerror();
 		RTC_WARN(C, "cannot load %s (%s); the collector runs without kernel tracing", tracelog_lib,
-		         dlerror());
+		         e ? e : "a function is missing");
+		rtc_counter_set(&st.k.unavailable, 1);
+		rtc_counter_set(&c->counters.trace_unavailable, 1);
+		return;
+	}
+	if (!load_traceparser()) {
+		const char *e = traceparser_skip ? traceparser_skip : dlerror();
+		RTC_WARN(C,
+		         "cannot load %s (%s); copy it from the QNX SDP ($QNX_TARGET/<arch>/usr/lib) to "
+		         "/usr/lib on the target; the collector runs without kernel tracing",
+		         traceparser_lib, e ? e : "a function is missing");
 		rtc_counter_set(&st.k.unavailable, 1);
 		rtc_counter_set(&c->counters.trace_unavailable, 1);
 		return;

@@ -22,7 +22,7 @@
 
 static void usage(FILE *f)
 {
-	fprintf(f, "usage: rtcollector --config PATH [-d|--debug] [--once]\n");
+	fprintf(f, "usage: rtcollector --config PATH [-d|--debug] [--once]\n       rtcollector --version\n");
 }
 
 int main(int argc, char **argv)

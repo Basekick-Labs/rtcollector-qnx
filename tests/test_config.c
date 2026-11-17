@@ -212,7 +212,42 @@ static void trace_defaults_follow_interval(void)
 	CHECK(load(&c, "trace_max_bytes: 65MiB\noutputs: [stdout]\n") == -1);
 }
 
+/* The example shipped with the release loads, with every input it names. */
+static void shipped_example_loads(void)
+{
+	rtc_config c;
+	rtc_config_defaults(&c);
+	CHECK(rtc_config_load(&c, "examples/rtcollector.yml") == 0);
+	CHECK(c.arc.enabled && c.interval_s == 1);
+	CHECK(!strcmp(c.arc.database, "qnx") && strstr(c.arc.url, "192.0.2.10") != NULL);
+	/* The QNX inputs are skipped (with a warning) on the host build, so the
+	 * names are checked in the text: each must be one the collector has. */
+	FILE *f = fopen("examples/rtcollector.yml", "r");
+	CHECK(f != NULL);
+	char line[256];
+	bool in_inputs = false;
+	unsigned names = 0;
+	while (f && fgets(line, sizeof(line), f)) {
+		if (!strncmp(line, "inputs:", 7)) {
+			in_inputs = true;
+			continue;
+		}
+		if (in_inputs && line[0] != ' ' && line[0] != '#' && line[0] != '\n')
+			in_inputs = false;
+		char name[32];
+		if (in_inputs && sscanf(line, " - %31[a-z_]", name) == 1) {
+			names++;
+			CHECK(!strcmp(name, "cpu") || !strcmp(name, "mem") || !strcmp(name, "processes") ||
+			      !strcmp(name, "trace") || !strcmp(name, "rmgr") || !strcmp(name, "internal"));
+		}
+	}
+	if (f)
+		fclose(f);
+	CHECK_EQ_U(names, 5);
+}
+
 const t_case config_cases[] = {
+    {"config", "shipped_example_loads", shipped_example_loads},
     {"config", "qnx_keys", qnx_keys},
     {"config", "trace_defaults_follow_interval", trace_defaults_follow_interval},
     {"config", "small_buffer_clamps_default_batch", small_buffer_clamps_default_batch},

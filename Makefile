@@ -150,7 +150,7 @@ qnx:
 # libtraceparser symbol (it must not carry QNX code: see trace.c).
 qnx-check:
 	@test -n "$(QNX_TARGET)" || { echo "source qnxsdp-env.sh first"; exit 1; }
-	scripts/qnx-check.sh build-qnx-$(ARCH)/rtcollector nto$(ARCH)-readelf
+	scripts/qnx-check.sh build-qnx-$(ARCH)/rtcollector nto$(subst aarch64le,aarch64,$(ARCH))-readelf
 
 $(BUILD)/rtc_writer: tests/qnx/rtc_writer.c include/rtc_publish.h
 	$(CC) $(CFLAGS) $< -o $@

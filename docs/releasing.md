@@ -35,6 +35,8 @@ runs on the build host at a time.
 
 ## What a release contains
 
+The bare binaries `rtcollector-X.Y.Z-qnx8.0-<arch>` with `NOTICE.txt` (NOTICE
+and the licence texts they must ship with), and
 `rtcollector-X.Y.Z-qnx8.0-<arch>.tar.gz` for `aarch64le` (Raspberry Pi 4) and
 `x86_64` (QEMU): stripped `rtcollector` and `rtc_writer`,
 `rtcollector-start.sh`, `rtcollector.yml`, `rtc_publish.h`, `LICENSE`,

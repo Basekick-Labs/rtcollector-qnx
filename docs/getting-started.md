@@ -1,8 +1,9 @@
-# Getting started: rtcollector on a Raspberry Pi 4 running QNX 8.0
+# Getting started: rtcollector on a Raspberry Pi 4 running QNX 8.0 (or QEMU)
 
 From a blank SD card to scheduling latencies, interrupts and CPU usage of a
 QNX system in [Arc](https://github.com/Basekick-Labs/arc), using a release
-binary. About an hour, most of it downloading and flashing.
+binary. About an hour, most of it downloading and flashing. No Pi? Any QNX
+8.0 target works; [run it on QEMU](#no-pi-run-it-on-qemu) instead.
 
 What you get: per-thread scheduling latency (how long each thread waited
 between becoming ready and running), interrupts per vector, context switches
@@ -94,8 +95,10 @@ allow port 8000.
 
 Download the release for the Pi from
 [the releases page](https://github.com/Basekick-Labs/rtcollector-qnx/releases):
-`rtcollector-<version>-qnx8.0-aarch64le.tar.gz` and `SHA256SUMS`. On your
-computer:
+`rtcollector-<version>-qnx8.0-aarch64le.tar.gz` and `SHA256SUMS`. (The bare
+binary, `rtcollector-<version>-qnx8.0-aarch64le`, is there too if you only
+want the program; the tarball adds `rtcollector-start.sh`, the example
+config and the header used below.) On your computer:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
@@ -189,6 +192,63 @@ fi
 and create the switch with `touch /boot/rtcollector_on`. Delete
 `rtcollector_on` from the card's boot partition (from any computer) to turn
 it off.
+
+## No Pi? Run it on QEMU
+
+Any QNX 8.0 target works; the release has an `x86_64` binary for a QNX
+virtual machine. You need a Linux computer with the QNX SDP 8.0 installed
+(`~/qnx800`), QEMU (`qemu-system-x86_64`, with KVM for speed), Python 3 and
+Docker, and a clone of this repository for its two helper scripts.
+
+1. Build and start a QNX 8.0 VM (`mkqnximage`, from the SDP). It runs in the
+   background with user networking: from the VM, your computer is
+   `10.0.2.2`.
+
+   ```sh
+   source ~/qnx800/qnxsdp-env.sh
+   scripts/qemu-vm.sh build
+   scripts/qemu-vm.sh run
+   python3 scripts/qnx-serial.py -- 'uname -a'    # runs a command in the VM
+   ```
+
+2. Start Arc on your computer as in step 4 (`docker run ... -p 8000:8000 ...`,
+   and keep the admin token).
+
+3. Put the binary, the trace library and a config in a directory on your
+   computer, and serve it to the VM:
+
+   ```sh
+   mkdir rtc && cd rtc
+   curl -fsSLO https://github.com/Basekick-Labs/rtcollector-qnx/releases/download/v<version>/rtcollector-<version>-qnx8.0-x86_64
+   curl -fsSLO https://github.com/Basekick-Labs/rtcollector-qnx/releases/download/v<version>/SHA256SUMS
+   sha256sum -c --ignore-missing SHA256SUMS
+   mv rtcollector-<version>-qnx8.0-x86_64 rtcollector
+   cp ~/qnx800/target/qnx/x86_64/usr/lib/libtraceparser.so.1 .
+   cat > rtcollector.yml <<'YML'
+   inputs: [cpu, mem, processes, trace, rmgr]
+   outputs:
+     - arc:
+         url: http://10.0.2.2:8000
+         database: qnx
+   YML
+   python3 -m http.server 8090 --bind 127.0.0.1   # leave it running; any free port
+   ```
+
+4. In another terminal (from the repository), install it in the VM, in a
+   directory only root can change (the VM's `/usr/lib` is read-only, so
+   `libtraceparser.so.1` goes next to the binary), and start it:
+
+   ```sh
+   python3 scripts/qnx-serial.py -- 'mkdir -p /data/rtc && cd /data/rtc && for f in rtcollector libtraceparser.so.1 rtcollector.yml; do curl -fsSO http://10.0.2.2:8090/$f || exit 1; done; chmod 755 rtcollector && chmod -R go-w /data/rtc && ./rtcollector --version'
+   python3 scripts/qnx-serial.py -- 'cd /data/rtc && RTC_ARC_TOKEN=<the admin token> ./rtcollector --config rtcollector.yml > /tmp/rtcollector.log 2>&1 & sleep 1'
+   ```
+
+   (The helper appends to each command, so a command must not end in `&`:
+   hence the `sleep 1`.)
+
+5. Query Arc as in step 7. The VM's clock comes from QEMU, so there is no
+   clock step on QEMU. Stop it with `python3 scripts/qnx-serial.py -- 'slay -s TERM rtcollector'`,
+   and the VM with `scripts/qemu-vm.sh stop`.
 
 ## Troubleshooting
 

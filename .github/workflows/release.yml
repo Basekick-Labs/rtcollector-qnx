@@ -1,0 +1,193 @@
+name: Release
+
+# Push release/X.Y.Z (cut from main) to build vX.Y.Z and create it as a
+# DRAFT release; a maintainer reviews and publishes it (docs/releasing.md).
+# The QNX build runs on Basekick's build host, reached over Tailscale; the
+# job that holds those secrets waits for a reviewer (environment `release`).
+on:
+  push:
+    branches:
+      - 'release/*'
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Version, notes, tag
+        id: v
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${REF_NAME#release/}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::branch must be release/X.Y.Z, got $REF_NAME"; exit 1; }
+          test -f "RELEASE_NOTES_${VERSION}.md" || { echo "::error::RELEASE_NOTES_${VERSION}.md is missing"; exit 1; }
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::tag v${VERSION} already exists"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "Building v$VERSION from $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  host-tests:
+    name: Host tests
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libyaml-dev libzstd-dev libcurl4-openssl-dev clang-format cppcheck
+      - run: make format-check
+      - run: make lint
+      - run: make test
+      - run: make test SANITIZE=1 BUILD=build-asan
+
+  qnx-build:
+    name: QNX build (build host)
+    needs: [prepare, host-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Join the tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          hostname: github-rtcollector-release
+          log-mode: quiet
+      - name: SSH key and pinned host key
+        env:
+          SSH_KEY: ${{ secrets.RELEASE_BUILD_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.RELEASE_BUILD_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          test -s "$RUNNER_TEMP/key" && test -s "$RUNNER_TEMP/known_hosts"
+      - name: Build on the build host
+        env:
+          HOST: ${{ secrets.RELEASE_BUILD_HOST }}
+          BUILD_USER: ${{ secrets.RELEASE_BUILD_USER }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for _ in 1 2 3 4 5 6; do getent hosts "$HOST" >/dev/null && break; sleep 5; done
+          mkdir out
+          # The source goes in on stdin; a tar of the packages comes back on
+          # stdout (capped). The host's log is shown only if the build fails.
+          set +e
+          git archive --format=tar "$SHA" |
+            ssh -i "$RUNNER_TEMP/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+              -o ServerAliveInterval=15 -o ConnectTimeout=30 \
+              "$BUILD_USER@$HOST" "build $VERSION $SHA" \
+              2> "$RUNNER_TEMP/host.log" | head -c 200000000 > out.tar
+          rc=("${PIPESTATUS[@]}")
+          set -e
+          if [ "${rc[0]}" != 0 ] || [ "${rc[1]}" != 0 ] || [ "${rc[2]}" != 0 ]; then
+            echo "::error::build on the build host failed (exit ${rc[*]})"
+            cat "$RUNNER_TEMP/host.log"
+            exit 1
+          fi
+      - name: Check what came back
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          want=$(printf '%s\n' MANIFEST.sha256 "rtcollector-$VERSION-qnx8.0-aarch64le.tar.gz" \
+            "rtcollector-$VERSION-qnx8.0-x86_64.tar.gz" | sort)
+          got=$(tar -tf out.tar | sed 's|^\./||' | grep -v '^$' | sort)
+          [ "$got" = "$want" ] || { echo "::error::unexpected files in the build output: $got"; exit 1; }
+          mkdir dist && tar -xf out.tar -C dist --no-same-owner
+          cd dist
+          sha256sum -c MANIFEST.sha256
+          for a in aarch64le x86_64; do
+            t="rtcollector-$VERSION-qnx8.0-$a.tar.gz"
+            gzip -t "$t"
+            d=$(mktemp -d); tar -xzf "$t" -C "$d"
+            b="$d/rtcollector-$VERSION-qnx8.0-$a/rtcollector"
+            file "$b" | tee /dev/stderr | grep -q "$( [ $a = aarch64le ] && echo 'ARM aarch64' || echo 'x86-64')"
+            strings "$b" | grep -qxF "$VERSION" || { echo "::error::$b does not carry version $VERSION"; exit 1; }
+            rm -rf "$d"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packages
+          path: |
+            dist/*.tar.gz
+          retention-days: 7
+
+  draft-release:
+    name: Draft release
+    needs: [prepare, qnx-build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: packages
+          path: dist
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.tar.gz > SHA256SUMS
+          {
+            cat "../RELEASE_NOTES_${VERSION}.md"
+            echo
+            echo "---"
+            echo
+            echo "Built from commit \`$SHA\` with the QNX SDP 8.0 on Basekick's build host."
+            echo "Getting started: [docs/getting-started.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/getting-started.md)."
+            echo "Free for non-commercial use; QNX libraries on your target are under QNX's terms (see NOTICE)."
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+          # Re-runs replace the draft.
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            if [ "$(gh release view "v$VERSION" --json isDraft -q .isDraft)" = true ]; then
+              gh release delete "v$VERSION" --yes
+            else
+              echo "::error::v$VERSION is already published"; exit 1
+            fi
+          fi
+          gh release create "v$VERSION" --draft --target "$SHA" --title "v$VERSION" \
+            --notes-file notes.md -- *.tar.gz SHA256SUMS
+          echo "Draft v$VERSION created at $SHA: review and publish it." >> "$GITHUB_STEP_SUMMARY"

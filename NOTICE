@@ -1,0 +1,30 @@
+rtcollector-qnx
+Copyright 2026 Basekick Labs
+
+The source code in this repository is licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+Release binaries
+----------------
+
+The release binaries are built with the QNX Software Development Platform
+8.0, available free of charge for non-commercial use through QNX Everywhere.
+They contain no QNX code: at run time they use the QNX libraries present on
+the target (libc, libm, libsocket, libcurl, libtracelog) and, for the trace
+input, libtraceparser, which you copy from your own QNX SDP. Those libraries
+are licensed to you by QNX under their own terms; using rtcollector-qnx on
+QNX does not give you any right to QNX software.
+
+rtcollector-qnx makes no claim to commercial use of QNX software.
+
+The binaries include, statically linked:
+
+- zstd 1.5.0 (BSD licence; licenses/zstd.txt)
+- libyaml 0.2.5 (MIT licence; licenses/libyaml.txt)
+
+Trademarks
+----------
+
+QNX is a trademark of BlackBerry Limited. Raspberry Pi is a trademark of
+Raspberry Pi Ltd. This project is not affiliated with, sponsored or endorsed
+by BlackBerry, QNX or Raspberry Pi Ltd.

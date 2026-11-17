@@ -125,18 +125,26 @@ static struct {
 
 static const char traceparser_lib[] = "libtraceparser.so.1";
 
-/* The library path first, then the directory of the executable. */
+/* The library path first, then the directory of the executable: dladdr() on
+ * one of our own functions names the file it came from (a non-root process
+ * may not read /proc/self/exefile on QNX 8, so that is only the second try). */
 static void *open_traceparser(void)
 {
 	void *h = dlopen(traceparser_lib, RTLD_NOW);
 	if (h)
 		return h;
 	char exe[256] = "";
-	FILE *f = fopen("/proc/self/exefile", "r");
-	if (f) {
-		if (!fgets(exe, sizeof(exe), f))
-			exe[0] = '\0';
-		fclose(f);
+	Dl_info di;
+	if (dladdr((void *)(uintptr_t)open_traceparser, &di) != 0 && di.dli_fname)
+		snprintf(exe, sizeof(exe), "%s", di.dli_fname);
+	if (!strchr(exe, '/')) {
+		exe[0] = '\0';
+		FILE *f = fopen("/proc/self/exefile", "r");
+		if (f) {
+			if (!fgets(exe, sizeof(exe), f))
+				exe[0] = '\0';
+			fclose(f);
+		}
 	}
 	char *slash = strrchr(exe, '/');
 	if (!slash)

@@ -15,9 +15,8 @@ and published by hand.
    git push origin main:refs/heads/release/X.Y.Z
    ```
 
-3. The workflow runs the host tests, then waits for a reviewer on the
-   `release` environment. Approving it lets the QNX build run on the build
-   host: the workflow sends `git archive` of the commit over SSH (Tailscale),
+3. The workflow runs the host tests, then the QNX build on the build host:
+   it sends `git archive` of the commit over SSH (Tailscale),
    the build host builds both architectures with the QNX SDP as an
    unprivileged user, checks them (`make qnx-check`) and returns the
    packages. The workflow verifies them and creates a **draft** release
@@ -47,13 +46,10 @@ says what they do contain.
 
 GitHub:
 
-- Environment `release`: a required reviewer, deployment branches
-  `release/*` only. Its **environment secrets** (not repository secrets; only
-  the `qnx-build` job, after approval, sees them): `TAILSCALE_AUTH_KEY`,
-  `RELEASE_BUILD_HOST`, `RELEASE_BUILD_USER`, `RELEASE_BUILD_SSH_KEY`,
-  `RELEASE_BUILD_KNOWN_HOSTS`.
-- Rulesets: only maintainers create or update `release/*` branches and `v*`
-  tags.
+- Repository Actions secrets: `TAILSCALE_AUTH_KEY`, `RELEASE_BUILD_HOST`,
+  `RELEASE_BUILD_USER`, `RELEASE_BUILD_SSH_KEY`, `RELEASE_BUILD_KNOWN_HOSTS`.
+  Forks never receive them; anyone with push access to this repository can
+  use them in a workflow, so keep push access to maintainers.
 - `TAILSCALE_AUTH_KEY`: reusable, ephemeral, tagged (the tailnet policy lets
   that tag reach only the build host's port 22). Auth keys expire (90 days at
   most): rotate it, or use a Tailscale OAuth client instead.

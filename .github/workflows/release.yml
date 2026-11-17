@@ -2,9 +2,9 @@ name: Release
 
 # Push release/X.Y.Z (cut from main) to build vX.Y.Z and create it as a
 # DRAFT release; a maintainer reviews and publishes it (docs/releasing.md).
-# The QNX build runs on Basekick's build host, reached over Tailscale. Its
-# secrets are environment secrets of `release`, which needs a reviewer's
-# approval and deploys only from release/* (docs/releasing.md).
+# The QNX build runs on Basekick's build host, reached over Tailscale with the
+# repository's RELEASE_BUILD_* and TAILSCALE_AUTH_KEY secrets (forks never get
+# them). See docs/releasing.md.
 on:
   push:
     branches:
@@ -77,7 +77,6 @@ jobs:
     needs: [prepare, host-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    environment: release
     # One build at a time on the build host, whatever the version.
     concurrency:
       group: rtc-release-build

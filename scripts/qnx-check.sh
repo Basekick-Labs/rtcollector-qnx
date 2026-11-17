@@ -14,6 +14,9 @@ command -v "$READELF" >/dev/null || { echo "qnx-check: $READELF not found"; exit
 dyn=$("$READELF" -d "$BIN")
 syms=$("$READELF" -s --wide "$BIN")
 [ -n "$dyn" ] && [ -n "$syms" ] || { echo "qnx-check: $READELF printed nothing for $BIN"; exit 1; }
+# The symbol test reads .symtab: run it on the unstripped binary.
+printf '%s\n' "$syms" | grep -q "Symbol table '.symtab'" ||
+	{ echo "qnx-check: $BIN has no .symtab (stripped?): check the unstripped binary"; exit 1; }
 
 fail=0
 needed=$(printf '%s\n' "$dyn" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
@@ -36,5 +39,5 @@ if printf '%s\n' "$syms" |
 	fail=1
 fi
 
-[ $fail = 0 ] && echo "qnx-check $BIN: ok ($(echo $needed))"
+[ $fail = 0 ] && echo "qnx-check $BIN: ok ($(printf '%s' "$needed" | tr '\n' ' '))"
 exit $fail

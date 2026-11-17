@@ -15,9 +15,15 @@ SHELL      := /bin/bash
 CC      ?= cc
 BUILD   ?= build
 VERSION ?= 0.1.0-dev
-# Release builds pass the commit time; otherwise now (evaluated once).
-ifeq ($(origin BUILD_EPOCH),undefined)
-  BUILD_EPOCH := $(shell date +%s)
+# Release builds pass the commit time; otherwise now (evaluated once). It
+# sets the clock floor (collector.c): empty, not a number or in the future, it
+# would make the collector drop every record, so the build refuses it.
+NOW := $(shell date +%s)
+ifeq ($(strip $(BUILD_EPOCH)),)
+  override BUILD_EPOCH := $(NOW)
+endif
+ifneq ($(shell [ "$$(echo '$(BUILD_EPOCH)' | tr -d 0-9)" = "" ] && [ '$(BUILD_EPOCH)' -le $(NOW) ] && echo ok),ok)
+  $(error BUILD_EPOCH must be seconds since 1970, not in the future: '$(BUILD_EPOCH)')
 endif
 
 UNAME := $(shell uname -s)
@@ -89,7 +95,7 @@ TEST_SRC := tests/main.c tests/test_record.c tests/test_ring.c tests/test_msgpac
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o) $(PLATFORM_SRC:%.c=$(BUILD)/%.o) $(YAML_OBJ)
 TEST_OBJ := $(TEST_SRC:%.c=$(BUILD)/%.o)
 
-.PHONY: all test tsan format format-check lint clean qnx
+.PHONY: all test tsan format format-check lint clean qnx qnx-check
 
 all: $(BUILD)/rtcollector
 
@@ -132,11 +138,13 @@ lint:
 	cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
 	  --suppress=missingIncludeSystem --inline-suppr -I src src tests
 
-# The version is compiled into main.o: rebuild it when VERSION changes.
+# VERSION is compiled into main.o and BUILD_EPOCH into collector.o: rebuild
+# them when either changes. (Make 3.81 compares times to the second: two
+# builds in one second can still miss it. Release builds start clean.)
 $(BUILD)/version.stamp: FORCE
 	@mkdir -p $(BUILD)
-	@echo '$(VERSION)' | cmp -s - $@ || echo '$(VERSION)' > $@
-$(BUILD)/src/main.o: $(BUILD)/version.stamp
+	@echo '$(VERSION) $(BUILD_EPOCH)' | cmp -s - $@ || echo '$(VERSION) $(BUILD_EPOCH)' > $@
+$(BUILD)/src/main.o $(BUILD)/src/core/collector.o: $(BUILD)/version.stamp
 .PHONY: FORCE
 FORCE:
 

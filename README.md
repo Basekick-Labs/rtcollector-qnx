@@ -40,7 +40,16 @@ make qnx ARCH=aarch64le   # build-qnx-aarch64le/rtcollector (Raspberry Pi)
 
 The QNX binary needs `libcurl.so.12` on the target (present on the standard
 QNX images); zstd and libyaml are linked in. libyaml 0.2.5 is vendored in
-`third_party/libyaml` because the SDP does not ship it.
+`third_party/libyaml` because the SDP does not ship it. The `trace` input
+also needs `libtracelog.so.1` (on the images) and `libtraceparser.so.1`,
+which the QNX 8.0 quickstart images do not have: copy it from the SDP
+(`$QNX_TARGET/aarch64le/usr/lib/` or `x86_64/usr/lib/`) to `/usr/lib` on
+the target. Both are loaded at run time, so the binary contains no QNX
+library; without them the other inputs run and `trace` reports itself
+unavailable. A copy next to the `rtcollector` binary is also used, but
+only from a directory and file owned by root (or the user running it)
+that no one else can write. `make qnx-check ARCH=...` checks what a build
+needs.
 
 ### Trying it on QEMU
 
@@ -220,7 +229,8 @@ How it works and what it costs:
   (`yielded`), and starts again when it is done (`sessions`).
 - Tracing needs `procnto-smp-instr` (the kernel QNX 8.0 ships) and root, or
   `PROCMGR_AID_TRACE` (`on -A trace,allow,nonroot`). Without them, without
-  `libtracelog.so.1`, when a second collector already traces, or when a trace
+  `libtracelog.so.1` or `libtraceparser.so.1` (see Building), when a second
+  collector already traces, or when a trace
   session cannot start for any other reason, the input logs why,
   `internal_trace.unavailable` and `internal_collector.trace_unavailable` are
   1, and the collector runs on. Tracing then stays off until the collector is

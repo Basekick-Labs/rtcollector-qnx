@@ -13,10 +13,17 @@ operating system around one rule:
 
 ## Status
 
-Pre-alpha. Runs on QNX 8.0 (tested on x86_64 under QEMU; Raspberry Pi next) and on
-macOS/Linux for development. This repository is Basekick Labs' entry to the
-[QNX Global Hackathon](https://qnx.devpost.com/) (submission deadline
-2026-12-15). Targets: Raspberry Pi 5 (aarch64) and QEMU (x86_64), QNX SDP 8.0.
+Pre-alpha. Runs on QNX 8.0, tested on a Raspberry Pi 4 (aarch64le) and on
+x86_64 under QEMU, and on macOS/Linux for development. This repository is
+Basekick Labs' entry to the [QNX Global Hackathon](https://qnx.devpost.com/)
+(submission deadline 2026-12-15).
+
+## Install from a release
+
+Binaries for the Raspberry Pi 4 (`aarch64le`) and QEMU (`x86_64`) are on the
+[releases page](https://github.com/Basekick-Labs/rtcollector-qnx/releases).
+[docs/getting-started.md](docs/getting-started.md) goes from a blank SD card
+to data in Arc. Maintainers: [docs/releasing.md](docs/releasing.md).
 
 ## Building
 
@@ -99,8 +106,7 @@ What a write costs and what it promises:
   priority (`rmgr_priority`, default 63): set it above every thread that
   writes. Measured on QEMU/KVM, all on one core: a priority-50 writer while a
   priority-5 writer floods and a priority-30 CPU hog runs: p99 about 10 µs,
-  worst 43 µs over 5 runs. If the handler threads cannot get `rmgr_priority` (above 63 needs root or `PROCMGR_AID_PRIORITY`), the device is refused rather than served with that promise broken. (The Raspberry Pi measurement comes with the
-  jitter harness.)
+  worst 43 µs over 5 runs. If the handler threads cannot get `rmgr_priority` (above 63 needs root or `PROCMGR_AID_PRIORITY`), the device is refused rather than served with that promise broken.
 - Why a pool and a fixed priority, both learned on QNX 8: with priority
   inheritance, a low-priority writer's handler ran at that writer's priority
   and anything in between preempted it; and a low-priority writer preempted

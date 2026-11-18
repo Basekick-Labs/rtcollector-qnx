@@ -138,6 +138,28 @@ collector runs without `/dev/rtcollector` and `rmgr_unavailable` is 1. A
 second collector refuses a path that is already registered. `--once` does not
 start it.
 
+### Example: a control loop
+
+`examples/control_loop.c`, built as `rtc_loop` by `make qnx`, is a periodic
+real-time loop (`SCHED_FIFO`) that measures itself and publishes its own
+counters to `/dev/rtcollector`: how late each cycle woke, how long it took,
+and how many cycles missed their deadline.
+
+```sh
+# 100 Hz, priority 20, on CPU 0, publishing once a second, for 5 minutes
+./rtc_loop -p 20 -c 0 -P 10000 -w 500 -t 300 -r 1
+```
+
+Options: `-p` priority (default 50), `-c` CPU (3), `-P` period in µs (1000),
+`-w` work per cycle in µs (100), `-d` deadline in µs (the period), `-t`
+seconds (60), `-r` publish rate in Hz (0: off), `-m sleep|precise`. Each
+publish is one line,
+`control_loop,loop=main wake_max_ns=..i,response_max_ns=..i,misses=..i,cycles=..i`,
+and a summary (percentiles of wake-up and response times) is printed at exit.
+Start a CPU hog at a higher priority on the same CPU (`on -p 30r -C 0 ...`)
+and both views show it: the loop's `misses` here, and its wait to run in the
+`trace` input's `sched` rows.
+
 ## Scheduling latency from the kernel trace: `trace`
 
 How long does each thread wait between becoming ready and running? The
